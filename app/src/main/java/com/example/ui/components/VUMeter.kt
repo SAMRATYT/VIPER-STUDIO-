@@ -32,6 +32,8 @@ fun DualChannelVUMeter(
     gameLevel: Float,
     micLevel: Float,
     isMicMuted: Boolean,
+    isInternalAudioEnabled: Boolean = true,
+    isMicAudioEnabled: Boolean = true,
     modifier: Modifier = Modifier
 ) {
     Row(
@@ -45,17 +47,19 @@ fun DualChannelVUMeter(
     ) {
         // Game Audio Channel
         ChannelBar(
-            label = "GAME",
-            level = gameLevel,
-            isMuted = false,
+            label = "GAME (BGMI)",
+            level = if (!isInternalAudioEnabled) 0f else gameLevel,
+            isMuted = !isInternalAudioEnabled,
+            mutedText = "OFF",
             modifier = Modifier.weight(1f)
         )
 
         // Mic Channel
         ChannelBar(
             label = "MIC",
-            level = if (isMicMuted) 0f else micLevel,
-            isMuted = isMicMuted,
+            level = if (isMicMuted || !isMicAudioEnabled) 0f else micLevel,
+            isMuted = isMicMuted || !isMicAudioEnabled,
+            mutedText = if (!isMicAudioEnabled) "OFF" else "MUTED",
             modifier = Modifier.weight(1f)
         )
     }
@@ -66,6 +70,7 @@ private fun ChannelBar(
     label: String,
     level: Float,
     isMuted: Boolean,
+    mutedText: String = "MUTED",
     modifier: Modifier = Modifier
 ) {
     val animatedLevel by animateFloatAsState(
@@ -87,7 +92,7 @@ private fun ChannelBar(
                 color = if (isMuted) Color(0xFFFF5252) else TextSecondary
             )
             Text(
-                text = if (isMuted) "MUTED" else "${(animatedLevel * 100).toInt()}%",
+                text = if (isMuted) mutedText else "${(animatedLevel * 100).toInt()}%",
                 fontSize = 10.sp,
                 color = if (isMuted) Color(0xFFFF5252) else TextMuted
             )

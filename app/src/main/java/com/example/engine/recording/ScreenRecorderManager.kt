@@ -89,16 +89,14 @@ class ScreenRecorderManager(
                     try {
                         videoTrackIndex = muxer.addTrack(format)
                         Log.i(TAG_MUXER, "Hardware video track added to MediaMuxer (index $videoTrackIndex). Format: $format")
-                        // If audio is also added, or if audio is not requested, start muxer
-                        val hasMicPerm = ContextCompat.checkSelfPermission(
-                            context,
-                            android.Manifest.permission.RECORD_AUDIO
-                        ) == PackageManager.PERMISSION_GRANTED
-
-                        if (audioTrackIndex != -1 || !hasMicPerm) {
+                        val encoder = ScreenCaptureEncoder.getInstance(context)
+                        val isAudioActive = encoder.isAudioActive()
+                        if (audioTrackIndex != -1 || !isAudioActive) {
                             muxer.start()
                             isMuxerStarted.set(true)
-                            Log.i(TAG_MUXER, "MediaMuxer started with video track $videoTrackIndex and audio track $audioTrackIndex.")
+                            Log.i(TAG_MUXER, "MediaMuxer started with video track $videoTrackIndex and audio track $audioTrackIndex (isAudioActive=$isAudioActive).")
+                        } else {
+                            Log.i(TAG_MUXER, "Video track added; waiting for audio track before starting MediaMuxer.")
                         }
                     } catch (e: Exception) {
                         Log.e(TAG_MUXER, "Error adding video track to MediaMuxer: ${e.message}", e)

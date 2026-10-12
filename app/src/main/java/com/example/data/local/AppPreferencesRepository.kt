@@ -57,6 +57,8 @@ class AppPreferencesRepository(context: Context) {
         return AudioMixConfig(
             gameAudioVolume = prefs.getFloat(KEY_GAME_VOLUME, 1.0f),
             micAudioVolume = prefs.getFloat(KEY_MIC_VOLUME, 1.2f),
+            isInternalAudioEnabled = prefs.getBoolean("key_internal_audio_enabled", true),
+            isMicAudioEnabled = prefs.getBoolean("key_mic_audio_enabled", true),
             isMicMuted = prefs.getBoolean(KEY_MIC_MUTED, false),
             isNoiseSuppressionEnabled = prefs.getBoolean(KEY_NOISE_SUPPRESSION, true),
             isEchoCancellationEnabled = prefs.getBoolean(KEY_ECHO_CANCELLATION, true),
@@ -73,6 +75,8 @@ class AppPreferencesRepository(context: Context) {
             putString(KEY_AUDIO_MODE, config.audioCaptureMode.name)
             putFloat(KEY_GAME_VOLUME, config.gameAudioVolume)
             putFloat(KEY_MIC_VOLUME, config.micAudioVolume)
+            putBoolean("key_internal_audio_enabled", config.isInternalAudioEnabled)
+            putBoolean("key_mic_audio_enabled", config.isMicAudioEnabled)
             putBoolean(KEY_MIC_MUTED, config.isMicMuted)
             putInt(KEY_AUDIO_DELAY_MS, config.audioDelayMs)
             apply()
@@ -146,24 +150,27 @@ class AppPreferencesRepository(context: Context) {
     fun loadYouTubeChannelInfo(): com.example.data.model.YouTubeChannelInfo {
         return com.example.data.model.YouTubeChannelInfo(
             isConnected = prefs.getBoolean("yt_is_connected", false),
+            accountEmail = prefs.getString("yt_account_email", "") ?: "",
             channelId = prefs.getString("yt_channel_id", "") ?: "",
-            channelTitle = prefs.getString("yt_channel_title", "VIPER GAMING LIVE") ?: "VIPER GAMING LIVE",
-            channelHandle = prefs.getString("yt_channel_handle", "@viper_official") ?: "@viper_official",
-            subscriberCountText = prefs.getString("yt_sub_count", "124K Subscribers") ?: "124K Subscribers",
+            channelTitle = prefs.getString("yt_channel_title", "") ?: "",
+            channelHandle = prefs.getString("yt_channel_handle", "") ?: "",
+            subscriberCountText = prefs.getString("yt_sub_count", "") ?: "",
             avatarUrl = prefs.getString("yt_avatar_url", "") ?: "",
             bannerUrl = prefs.getString("yt_banner_url", "") ?: "",
-            activeBroadcastTitle = prefs.getString("yt_broadcast_title", "BGMI Pro Championship Stream") ?: "BGMI Pro Championship Stream",
+            activeBroadcastTitle = prefs.getString("yt_broadcast_title", "") ?: "",
             activeBroadcastId = prefs.getString("yt_broadcast_id", "") ?: "",
             activeLiveChatId = prefs.getString("yt_chat_id", "") ?: "",
             streamKey = prefs.getString("yt_stream_key", "") ?: "",
             rtmpIngestUrl = prefs.getString("yt_ingest_url", "rtmp://a.rtmp.youtube.com/live2") ?: "rtmp://a.rtmp.youtube.com/live2",
-            lastSyncTimeMs = prefs.getLong("yt_last_sync", 0L)
+            lastSyncTimeMs = prefs.getLong("yt_last_sync", 0L),
+            isYouTubeAuthorized = prefs.getBoolean("yt_is_authorized", false)
         )
     }
 
     fun saveYouTubeChannelInfo(info: com.example.data.model.YouTubeChannelInfo) {
         prefs.edit().apply {
             putBoolean("yt_is_connected", info.isConnected)
+            putString("yt_account_email", info.accountEmail)
             putString("yt_channel_id", info.channelId)
             putString("yt_channel_title", info.channelTitle)
             putString("yt_channel_handle", info.channelHandle)
@@ -176,6 +183,7 @@ class AppPreferencesRepository(context: Context) {
             putString("yt_stream_key", info.streamKey)
             putString("yt_ingest_url", info.rtmpIngestUrl)
             putLong("yt_last_sync", info.lastSyncTimeMs)
+            putBoolean("yt_is_authorized", info.isYouTubeAuthorized)
             apply()
         }
     }

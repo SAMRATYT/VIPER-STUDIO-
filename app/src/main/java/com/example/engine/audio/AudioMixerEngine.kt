@@ -70,6 +70,20 @@ class AudioMixerEngine(private val context: Context) {
         syncWithEncoder(updated)
     }
 
+    fun toggleInternalAudio() {
+        val current = _config.value.isInternalAudioEnabled
+        val updated = _config.value.copy(isInternalAudioEnabled = !current)
+        _config.value = updated
+        syncWithEncoder(updated)
+    }
+
+    fun toggleMicAudio() {
+        val current = _config.value.isMicAudioEnabled
+        val updated = _config.value.copy(isMicAudioEnabled = !current)
+        _config.value = updated
+        syncWithEncoder(updated)
+    }
+
     fun toggleMicMute() {
         val current = _config.value.isMicMuted
         val updated = _config.value.copy(isMicMuted = !current)
@@ -143,7 +157,7 @@ class AudioMixerEngine(private val context: Context) {
                 var currentMicLevel = 0f
                 val cfg = _config.value
 
-                if (hasPerm && audioRecord != null && !cfg.isMicMuted &&
+                if (hasPerm && audioRecord != null && !cfg.isMicMuted && cfg.isMicAudioEnabled &&
                     cfg.audioCaptureMode != AudioCaptureMode.INTERNAL_ONLY &&
                     audioRecord?.recordingState == AudioRecord.RECORDSTATE_RECORDING
                 ) {
@@ -157,8 +171,8 @@ class AudioMixerEngine(private val context: Context) {
                     }
                 }
 
-                // Realistic internal game audio preview pulsation if game volume is active and mode includes internal audio
-                val gameSim = if (cfg.gameAudioVolume > 0.05f && cfg.audioCaptureMode != AudioCaptureMode.MIC_ONLY) {
+                // Realistic internal game audio preview pulsation if game volume is active, internal audio is enabled, and mode includes internal audio
+                val gameSim = if (cfg.isInternalAudioEnabled && cfg.gameAudioVolume > 0.05f && cfg.audioCaptureMode != AudioCaptureMode.MIC_ONLY) {
                     val basePulse = (0.20f + (System.currentTimeMillis() % 1200) / 2400f) * cfg.gameAudioVolume
                     basePulse.coerceIn(0f, 1f)
                 } else 0f

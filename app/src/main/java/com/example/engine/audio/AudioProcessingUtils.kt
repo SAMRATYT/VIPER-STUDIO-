@@ -52,8 +52,10 @@ object AudioProcessingUtils {
         micPcm: ShortArray,
         micVolume: Float,
         isMicMuted: Boolean,
+        isMicEnabled: Boolean = true,
         gamePcm: ShortArray,
         gameVolume: Float,
+        isInternalAudioEnabled: Boolean = true,
         outputPcm: ShortArray,
         mode: AudioCaptureMode
     ) {
@@ -61,15 +63,19 @@ object AudioProcessingUtils {
 
         when (mode) {
             AudioCaptureMode.INTERNAL_ONLY -> {
-                // Game only; mic completely muted
-                for (i in 0 until count) {
-                    val gameSample = gamePcm[i] * gameVolume
-                    outputPcm[i] = softClip(gameSample)
+                // Game only; mic completely muted and excluded
+                if (!isInternalAudioEnabled || gameVolume <= 0f) {
+                    outputPcm.fill(0, 0, count)
+                } else {
+                    for (i in 0 until count) {
+                        val gameSample = gamePcm[i] * gameVolume
+                        outputPcm[i] = softClip(gameSample)
+                    }
                 }
             }
             AudioCaptureMode.MIC_ONLY -> {
-                // Mic only; game muted
-                if (isMicMuted) {
+                // Mic only; game completely excluded
+                if (isMicMuted || !isMicEnabled || micVolume <= 0f) {
                     outputPcm.fill(0, 0, count)
                 } else {
                     for (i in 0 until count) {
@@ -79,13 +85,27 @@ object AudioProcessingUtils {
                 }
             }
             AudioCaptureMode.INTERNAL_AND_MIC -> {
-                // Mix both internal game and microphone
-                val effectiveMicVol = if (isMicMuted) 0f else micVolume
-                for (i in 0 until count) {
-                    val micSample = if (effectiveMicVol > 0f) micPcm[i] * effectiveMicVol else 0f
-                    val gameSample = if (gameVolume > 0f) gamePcm[i] * gameVolume else 0f
-                    val mixed = micSample + gameSample
-                    outputPcm[i] = softClip(mixed)
+                // Independent toggles: when microphone is OFF, NEVER mix mic samples.
+                // When microphone is ON, mix both safely with soft-clipping limiter.
+                val effectiveMicVol = if (isMicMuted || !isMicEnabled) 0f else micVolume
+                val effectiveGameVol = if (!isInternalAudioEnabled) 0f else gameVolume
+
+                if (effectiveMicVol <= 0f && effectiveGameVol <= 0f) {
+                    outputPcm.fill(0, 0, count)
+                } else if (effectiveMicVol <= 0f) {
+                    for (i in 0 until count) {
+                        outputPcm[i] = softClip(gamePcm[i] * effectiveGameVol)
+                    }
+                } else if (effectiveGameVol <= 0f) {
+                    for (i in 0 until count) {
+                        outputPcm[i] = softClip(micPcm[i] * effectiveMicVol)
+                    }
+                } else {
+                    for (i in 0 until count) {
+                        val micSample = micPcm[i] * effectiveMicVol
+                        val gameSample = gamePcm[i] * effectiveGameVol
+                        outputPcm[i] = softClip(micSample + gameSample)
+                    }
                 }
             }
         }

@@ -57,6 +57,8 @@ enum class AudioCaptureMode(val displayName: String, val shortLabel: String) {
 data class AudioMixConfig(
     val gameAudioVolume: Float = 1.0f, // 0.0 to 2.0 (200% boost)
     val micAudioVolume: Float = 1.2f,  // 0.0 to 2.0 (200% boost)
+    val isInternalAudioEnabled: Boolean = true,
+    val isMicAudioEnabled: Boolean = true,
     val isMicMuted: Boolean = false,
     val isNoiseSuppressionEnabled: Boolean = true,
     val isEchoCancellationEnabled: Boolean = true,
@@ -133,18 +135,20 @@ data class ScenePreset(
 
 data class YouTubeChannelInfo(
     val isConnected: Boolean = false,
+    val accountEmail: String = "",
     val channelId: String = "",
-    val channelTitle: String = "VIPER GAMING LIVE",
-    val channelHandle: String = "@viper_official",
-    val subscriberCountText: String = "124K Subscribers",
+    val channelTitle: String = "",
+    val channelHandle: String = "",
+    val subscriberCountText: String = "",
     val avatarUrl: String = "",
     val bannerUrl: String = "",
-    val activeBroadcastTitle: String = "BGMI Pro Championship Stream",
+    val activeBroadcastTitle: String = "",
     val activeBroadcastId: String = "",
     val activeLiveChatId: String = "",
     val streamKey: String = "",
     val rtmpIngestUrl: String = "rtmp://a.rtmp.youtube.com/live2",
-    val lastSyncTimeMs: Long = 0L
+    val lastSyncTimeMs: Long = 0L,
+    val isYouTubeAuthorized: Boolean = false
 )
 
 data class LiveChatSettings(

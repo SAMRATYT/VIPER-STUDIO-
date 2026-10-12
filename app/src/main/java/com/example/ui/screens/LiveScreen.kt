@@ -28,11 +28,16 @@ import androidx.compose.material.icons.filled.Cameraswitch
 import androidx.compose.material.icons.filled.Chat
 import androidx.compose.material.icons.filled.CheckCircle
 import androidx.compose.material.icons.filled.ContentPaste
+import androidx.compose.material.icons.filled.GraphicEq
 import androidx.compose.material.icons.filled.Info
-import androidx.compose.material.icons.filled.Key
+import androidx.compose.material.icons.filled.Link
+import androidx.compose.material.icons.filled.LinkOff
+import androidx.compose.material.icons.filled.Mic
+import androidx.compose.material.icons.filled.MicOff
 import androidx.compose.material.icons.filled.PlayArrow
 import androidx.compose.material.icons.filled.ScreenRotation
 import androidx.compose.material.icons.filled.Stop
+import androidx.compose.material.icons.filled.SwitchAccount
 import androidx.compose.material.icons.filled.Sync
 import androidx.compose.material.icons.filled.Visibility
 import androidx.compose.material.icons.filled.VisibilityOff
@@ -43,6 +48,7 @@ import androidx.compose.material3.CardDefaults
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
+import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.OutlinedTextFieldDefaults
 import androidx.compose.material3.Tab
@@ -105,6 +111,8 @@ fun LiveScreen(
     val liveChatSettings by viewModel.liveChatSettings.collectAsState()
     val youTubeChannelInfo by viewModel.youTubeChannelInfo.collectAsState()
     val isYouTubeSyncing by viewModel.isYouTubeSyncing.collectAsState()
+    val authError by viewModel.authError.collectAsState()
+    val audioConfig by viewModel.audioConfig.collectAsState()
 
     val clipboardManager = LocalClipboardManager.current
     val context = LocalContext.current
@@ -339,6 +347,64 @@ fun LiveScreen(
             }
         }
 
+        // Audio Source Quick Selector (Internal Audio vs Microphone)
+        Row(
+            modifier = Modifier.fillMaxWidth(),
+            horizontalArrangement = Arrangement.spacedBy(8.dp)
+        ) {
+            Box(
+                modifier = Modifier
+                    .weight(1f)
+                    .clip(RoundedCornerShape(10.dp))
+                    .background(if (audioConfig.isInternalAudioEnabled) Color(0xFF132A1C) else Color(0xFF131A28))
+                    .border(1.dp, if (audioConfig.isInternalAudioEnabled) ViperGreen else Color(0xFF263348), RoundedCornerShape(10.dp))
+                    .clickable { viewModel.toggleInternalAudio() }
+                    .padding(vertical = 10.dp, horizontal = 8.dp),
+                contentAlignment = Alignment.Center
+            ) {
+                Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+                    Icon(
+                        Icons.Default.GraphicEq,
+                        contentDescription = null,
+                        tint = if (audioConfig.isInternalAudioEnabled) ViperGreen else TextMuted,
+                        modifier = Modifier.size(16.dp)
+                    )
+                    Text(
+                        text = if (audioConfig.isInternalAudioEnabled) "GAME AUDIO: ON" else "GAME AUDIO: OFF",
+                        fontSize = 11.sp,
+                        fontWeight = FontWeight.Bold,
+                        color = if (audioConfig.isInternalAudioEnabled) ViperGreen else TextSecondary
+                    )
+                }
+            }
+
+            Box(
+                modifier = Modifier
+                    .weight(1f)
+                    .clip(RoundedCornerShape(10.dp))
+                    .background(if (audioConfig.isMicAudioEnabled) Color(0xFF0F2B30) else Color(0xFF131A28))
+                    .border(1.dp, if (audioConfig.isMicAudioEnabled) ViperCyan else Color(0xFF263348), RoundedCornerShape(10.dp))
+                    .clickable { viewModel.toggleMicAudio() }
+                    .padding(vertical = 10.dp, horizontal = 8.dp),
+                contentAlignment = Alignment.Center
+            ) {
+                Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+                    Icon(
+                        if (audioConfig.isMicAudioEnabled && !audioConfig.isMicMuted) Icons.Default.Mic else Icons.Default.MicOff,
+                        contentDescription = null,
+                        tint = if (audioConfig.isMicAudioEnabled) ViperCyan else TextMuted,
+                        modifier = Modifier.size(16.dp)
+                    )
+                    Text(
+                        text = if (audioConfig.isMicAudioEnabled) "MIC: ON" else "MIC: OFF",
+                        fontSize = 11.sp,
+                        fontWeight = FontWeight.Bold,
+                        color = if (audioConfig.isMicAudioEnabled) ViperCyan else TextSecondary
+                    )
+                }
+            }
+        }
+
         // GO LIVE Big Action Button
         Button(
             onClick = {
@@ -373,7 +439,7 @@ fun LiveScreen(
             )
         }
 
-        // YouTube Channel Connection & Auto Stream Key Card
+        // YouTube Channel Connection, Google OAuth & Account Selection Card
         Card(
             modifier = Modifier.fillMaxWidth(),
             colors = CardDefaults.cardColors(containerColor = ViperSurfaceCard),
@@ -388,7 +454,7 @@ fun LiveScreen(
                     Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                         Icon(Icons.Default.AccountCircle, contentDescription = null, tint = Color(0xFFFF0000), modifier = Modifier.size(18.dp))
                         Text(
-                            text = "YOUTUBE BROADCAST & CHANNEL SYNC",
+                            text = "GOOGLE ACCOUNT & YOUTUBE LIVE SYNC",
                             fontSize = 11.sp,
                             fontWeight = FontWeight.Bold,
                             color = TextSecondary
@@ -398,37 +464,79 @@ fun LiveScreen(
                     if (youTubeChannelInfo.isConnected) {
                         Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(4.dp)) {
                             Icon(Icons.Default.CheckCircle, contentDescription = null, tint = ViperGreen, modifier = Modifier.size(13.dp))
-                            Text("LINKED", fontSize = 10.sp, fontWeight = FontWeight.Bold, color = ViperGreen)
+                            Text(
+                                text = if (youTubeChannelInfo.isYouTubeAuthorized) "YOUTUBE LINKED" else "GOOGLE CONNECTED",
+                                fontSize = 10.sp,
+                                fontWeight = FontWeight.Bold,
+                                color = ViperGreen
+                            )
+                        }
+                    }
+                }
+
+                // Authentication or Sync Error Banner
+                if (authError != null) {
+                    Card(
+                        modifier = Modifier.fillMaxWidth(),
+                        colors = CardDefaults.cardColors(containerColor = Color(0xFF33141E)),
+                        shape = RoundedCornerShape(8.dp)
+                    ) {
+                        Row(
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .padding(10.dp),
+                            horizontalArrangement = Arrangement.SpaceBetween,
+                            verticalAlignment = Alignment.CenterVertically
+                        ) {
+                            Column(modifier = Modifier.weight(1f)) {
+                                Text("AUTHENTICATION NOTICE", fontSize = 10.sp, fontWeight = FontWeight.Bold, color = Color(0xFFFF5252))
+                                Text(authError ?: "", fontSize = 11.sp, color = TextPrimary)
+                            }
+                            IconButton(onClick = { viewModel.clearAuthError() }) {
+                                Text("✕", color = Color.White, fontWeight = FontWeight.Bold, fontSize = 14.sp)
+                            }
                         }
                     }
                 }
 
                 if (!youTubeChannelInfo.isConnected) {
                     Text(
-                        text = "Sign in with Google to link your YouTube channel, auto-retrieve your active stream key, and enable real-time chat sync.",
+                        text = "Sign in with your Google account to choose your Gmail account, connect YouTube live broadcasts, auto-retrieve stream keys, and sync live chat in real time.",
                         fontSize = 11.sp,
                         color = TextSecondary
                     )
 
+                    // Requirement 1: Visible "Sign in with Google" button
+                    // Requirement 2 & 3: Opens Google Account Picker, does not auto-select
                     Button(
                         onClick = { viewModel.signInWithGoogle(context) },
-                        colors = ButtonDefaults.buttonColors(containerColor = Color(0xFFFF0000), contentColor = Color.White),
+                        enabled = !isYouTubeSyncing,
+                        colors = ButtonDefaults.buttonColors(containerColor = Color(0xFF4285F4), contentColor = Color.White),
                         shape = RoundedCornerShape(8.dp),
-                        modifier = Modifier.fillMaxWidth()
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .testTag("google_sign_in_button")
                     ) {
-                        Icon(Icons.Default.Sync, contentDescription = null, modifier = Modifier.size(15.dp))
-                        Spacer(modifier = Modifier.width(6.dp))
-                        Text("Connect YouTube Channel (Google Sign-In)", fontSize = 11.sp, fontWeight = FontWeight.Bold)
+                        if (isYouTubeSyncing) {
+                            CircularProgressIndicator(modifier = Modifier.size(16.dp), color = Color.White, strokeWidth = 2.dp)
+                            Spacer(modifier = Modifier.width(8.dp))
+                            Text("Opening Account Picker...", fontSize = 12.sp, fontWeight = FontWeight.Bold)
+                        } else {
+                            Icon(Icons.Default.AccountCircle, contentDescription = null, modifier = Modifier.size(18.dp))
+                            Spacer(modifier = Modifier.width(8.dp))
+                            Text("Sign in with Google", fontSize = 13.sp, fontWeight = FontWeight.Bold)
+                        }
                     }
                 } else {
+                    // Connected Account Profile Display (Requirement 7: Real user information, never fake data)
                     Row(
                         modifier = Modifier
                             .fillMaxWidth()
                             .clip(RoundedCornerShape(8.dp))
                             .background(Color(0xFF101726))
-                            .padding(8.dp),
+                            .padding(10.dp),
                         verticalAlignment = Alignment.CenterVertically,
-                        horizontalArrangement = Arrangement.spacedBy(8.dp)
+                        horizontalArrangement = Arrangement.spacedBy(10.dp)
                     ) {
                         if (youTubeChannelInfo.avatarUrl.isNotBlank()) {
                             AsyncImage(
@@ -436,23 +544,23 @@ fun LiveScreen(
                                     .data(youTubeChannelInfo.avatarUrl)
                                     .crossfade(true)
                                     .build(),
-                                contentDescription = "Channel Avatar",
+                                contentDescription = "Profile Avatar",
                                 contentScale = ContentScale.Crop,
                                 modifier = Modifier
-                                    .size(32.dp)
+                                    .size(36.dp)
                                     .clip(CircleShape)
                             )
                         } else {
                             Box(
                                 modifier = Modifier
-                                    .size(32.dp)
+                                    .size(36.dp)
                                     .clip(CircleShape)
                                     .background(Color(0xFF26334D)),
                                 contentAlignment = Alignment.Center
                             ) {
                                 Text(
-                                    text = youTubeChannelInfo.channelTitle.take(1).uppercase(),
-                                    fontSize = 14.sp,
+                                    text = if (youTubeChannelInfo.channelTitle.isNotBlank()) youTubeChannelInfo.channelTitle.take(1).uppercase() else "G",
+                                    fontSize = 16.sp,
                                     fontWeight = FontWeight.Bold,
                                     color = ViperCyan
                                 )
@@ -461,16 +569,60 @@ fun LiveScreen(
 
                         Column(modifier = Modifier.weight(1f)) {
                             Text(
-                                text = youTubeChannelInfo.channelTitle,
-                                fontSize = 12.sp,
+                                text = if (youTubeChannelInfo.channelTitle.isNotBlank()) youTubeChannelInfo.channelTitle else youTubeChannelInfo.accountEmail,
+                                fontSize = 13.sp,
                                 fontWeight = FontWeight.Bold,
                                 color = TextPrimary
                             )
-                            Text(
-                                text = "${youTubeChannelInfo.channelHandle} • ${youTubeChannelInfo.subscriberCountText}",
-                                fontSize = 10.sp,
-                                color = TextMuted
-                            )
+                            if (youTubeChannelInfo.accountEmail.isNotBlank()) {
+                                Text(
+                                    text = youTubeChannelInfo.accountEmail,
+                                    fontSize = 10.sp,
+                                    color = ViperCyan
+                                )
+                            }
+                            if (youTubeChannelInfo.subscriberCountText.isNotBlank()) {
+                                Text(
+                                    text = "${youTubeChannelInfo.channelHandle} • ${youTubeChannelInfo.subscriberCountText}",
+                                    fontSize = 10.sp,
+                                    color = TextMuted
+                                )
+                            }
+                        }
+                    }
+
+                    // Requirement 6: Connect YouTube Permissions only when requested
+                    if (!youTubeChannelInfo.isYouTubeAuthorized) {
+                        Card(
+                            modifier = Modifier.fillMaxWidth(),
+                            colors = CardDefaults.cardColors(containerColor = Color(0xFF1A1215)),
+                            border = androidx.compose.foundation.BorderStroke(1.dp, Color(0x33FF0000)),
+                            shape = RoundedCornerShape(8.dp)
+                        ) {
+                            Column(modifier = Modifier.padding(10.dp), verticalArrangement = Arrangement.spacedBy(6.dp)) {
+                                Text(
+                                    text = "YOUTUBE BROADCAST PERMISSIONS",
+                                    fontSize = 10.sp,
+                                    fontWeight = FontWeight.Bold,
+                                    color = Color(0xFFFF5252)
+                                )
+                                Text(
+                                    text = "Authorize VIPER STUDIO to retrieve your real YouTube live stream key and enable automated chat synchronizer.",
+                                    fontSize = 11.sp,
+                                    color = TextSecondary
+                                )
+                                Button(
+                                    onClick = { viewModel.connectYouTubePermissions() },
+                                    enabled = !isYouTubeSyncing,
+                                    colors = ButtonDefaults.buttonColors(containerColor = Color(0xFFFF0000), contentColor = Color.White),
+                                    shape = RoundedCornerShape(6.dp),
+                                    modifier = Modifier.fillMaxWidth()
+                                ) {
+                                    Icon(Icons.Default.Link, contentDescription = null, modifier = Modifier.size(15.dp))
+                                    Spacer(modifier = Modifier.width(6.dp))
+                                    Text("Connect YouTube Permissions", fontSize = 11.sp, fontWeight = FontWeight.Bold)
+                                }
+                            }
                         }
                     }
 
@@ -485,8 +637,6 @@ fun LiveScreen(
                             shape = RoundedCornerShape(8.dp),
                             modifier = Modifier.weight(1f)
                         ) {
-                            Icon(Icons.Default.Key, contentDescription = null, modifier = Modifier.size(14.dp))
-                            Spacer(modifier = Modifier.width(4.dp))
                             Text("Auto-Fill Key", fontSize = 11.sp, fontWeight = FontWeight.Bold)
                         }
 
@@ -504,6 +654,40 @@ fun LiveScreen(
                             }
                             Spacer(modifier = Modifier.width(4.dp))
                             Text("Sync Broadcast", fontSize = 11.sp)
+                        }
+                    }
+
+                    // Requirement 4: "Switch Google Account" and "Disconnect Account" buttons
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        horizontalArrangement = Arrangement.spacedBy(8.dp)
+                    ) {
+                        OutlinedButton(
+                            onClick = { viewModel.switchGoogleAccount(context) },
+                            enabled = !isYouTubeSyncing,
+                            colors = ButtonDefaults.outlinedButtonColors(contentColor = ViperCyan),
+                            shape = RoundedCornerShape(8.dp),
+                            modifier = Modifier
+                                .weight(1f)
+                                .testTag("switch_google_account_button")
+                        ) {
+                            Icon(Icons.Default.SwitchAccount, contentDescription = null, modifier = Modifier.size(14.dp))
+                            Spacer(modifier = Modifier.width(4.dp))
+                            Text("Switch Account", fontSize = 11.sp, fontWeight = FontWeight.SemiBold)
+                        }
+
+                        OutlinedButton(
+                            onClick = { viewModel.disconnectAccount(context) },
+                            enabled = !isYouTubeSyncing,
+                            colors = ButtonDefaults.outlinedButtonColors(contentColor = Color(0xFFFF5252)),
+                            shape = RoundedCornerShape(8.dp),
+                            modifier = Modifier
+                                .weight(1f)
+                                .testTag("disconnect_google_account_button")
+                        ) {
+                            Icon(Icons.Default.LinkOff, contentDescription = null, modifier = Modifier.size(14.dp))
+                            Spacer(modifier = Modifier.width(4.dp))
+                            Text("Disconnect", fontSize = 11.sp, fontWeight = FontWeight.SemiBold)
                         }
                     }
                 }

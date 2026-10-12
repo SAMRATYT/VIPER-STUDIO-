@@ -8,6 +8,8 @@ import com.example.data.model.StreamConfig
 import com.example.engine.audio.AudioMixerEngine
 import com.example.engine.hardware.HardwareEncoderDetector
 import com.example.engine.streaming.RtmpStreamEngine
+import com.example.data.model.AudioCaptureMode
+import com.example.engine.audio.AudioProcessingUtils
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNotNull
@@ -292,8 +294,15 @@ class ExampleRobolectricTest {
             previousPtsUs = currentPtsUs
 
             com.example.engine.audio.AudioProcessingUtils.mixStereoPcm(
-                micPcm, 1.2f, false, gamePcm, 1.0f, outPcm,
-                com.example.data.model.AudioCaptureMode.INTERNAL_AND_MIC
+                micPcm = micPcm,
+                micVolume = 1.2f,
+                isMicMuted = false,
+                isMicEnabled = true,
+                gamePcm = gamePcm,
+                gameVolume = 1.0f,
+                isInternalAudioEnabled = true,
+                outputPcm = outPcm,
+                mode = com.example.data.model.AudioCaptureMode.INTERNAL_AND_MIC
             )
             framesProcessed += samplesPerFrame
         }
@@ -442,6 +451,87 @@ class ExampleRobolectricTest {
         assertEquals(customChatSettings.xPct, loaded.xPct, 0.01f)
         assertEquals(customChatSettings.yPct, loaded.yPct, 0.01f)
         assertTrue("Lock state must persist", loaded.isLocked)
+    }
+
+    @Test
+    fun `test audio mixing with independent toggles and clipping protection`() {
+        // 1. Acceptance test: Microphone OFF -> ZERO mic samples mixed into game audio
+        val frameSize = AudioProcessingUtils.FRAME_SIZE_SHORTS
+        val micPcm = ShortArray(frameSize) { 15000.toShort() }
+        val gamePcm = ShortArray(frameSize) { 10000.toShort() }
+        val outPcm = ShortArray(frameSize)
+
+        // Mic OFF, Game ON
+        AudioProcessingUtils.mixStereoPcm(
+            micPcm = micPcm,
+            micVolume = 1.0f,
+            isMicMuted = false,
+            isMicEnabled = false,
+            gamePcm = gamePcm,
+            gameVolume = 1.0f,
+            isInternalAudioEnabled = true,
+            outputPcm = outPcm,
+            mode = AudioCaptureMode.INTERNAL_AND_MIC
+        )
+
+        for (i in 0 until 10) {
+            assertEquals("When mic is OFF, output must exactly match game sample without mic bleed", 10000.toShort(), outPcm[i])
+        }
+
+        // 2. Acceptance test: Microphone ON -> Both mixed safely with soft clipping protection
+        AudioProcessingUtils.mixStereoPcm(
+            micPcm = micPcm,
+            micVolume = 1.5f,
+            isMicMuted = false,
+            isMicEnabled = true,
+            gamePcm = gamePcm,
+            gameVolume = 1.5f,
+            isInternalAudioEnabled = true,
+            outputPcm = outPcm,
+            mode = AudioCaptureMode.INTERNAL_AND_MIC
+        )
+
+        for (i in 0 until 10) {
+            assertTrue("Mixed audio should not exceed 32767", outPcm[i] <= 32767)
+            assertTrue("Mixed audio should be louder than individual components", outPcm[i] > 15000)
+        }
+
+        // 3. Test Internal Audio OFF -> Output is pure mic
+        AudioProcessingUtils.mixStereoPcm(
+            micPcm = micPcm,
+            micVolume = 1.0f,
+            isMicMuted = false,
+            isMicEnabled = true,
+            gamePcm = gamePcm,
+            gameVolume = 1.0f,
+            isInternalAudioEnabled = false,
+            outputPcm = outPcm,
+            mode = AudioCaptureMode.INTERNAL_AND_MIC
+        )
+
+        for (i in 0 until 10) {
+            assertEquals("When internal game audio is OFF, output must equal mic sample", 15000.toShort(), outPcm[i])
+        }
+    }
+
+    @Test
+    fun `test mono upmix and linear stereo resampler`() {
+        val monoPcm = shortArrayOf(1000, 2000, 3000)
+        val stereoOut = ShortArray(6)
+        val count = AudioProcessingUtils.upmixMonoToStereo(monoPcm, monoPcm.size, stereoOut)
+
+        assertEquals(6, count)
+        assertEquals(1000.toShort(), stereoOut[0]) // L
+        assertEquals(1000.toShort(), stereoOut[1]) // R
+        assertEquals(2000.toShort(), stereoOut[2]) // L
+        assertEquals(2000.toShort(), stereoOut[3]) // R
+
+        // Resampling 44.1kHz to 48kHz
+        val srcStereo = ShortArray(441 * 2) { 5000.toShort() }
+        val dstStereo = ShortArray(480 * 2)
+        val resampled = AudioProcessingUtils.resampleLinearStereo(srcStereo, 441, 44100, dstStereo, 480, 48000)
+        assertEquals(960, resampled)
+        assertEquals(5000.toShort(), dstStereo[0])
     }
 }
 

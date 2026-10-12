@@ -25,8 +25,10 @@ import androidx.compose.material.icons.filled.AccountCircle
 import androidx.compose.material.icons.filled.Chat
 import androidx.compose.material.icons.filled.CheckCircle
 import androidx.compose.material.icons.filled.GraphicEq
+import androidx.compose.material.icons.filled.Link
 import androidx.compose.material.icons.filled.LinkOff
 import androidx.compose.material.icons.filled.Memory
+import androidx.compose.material.icons.filled.SwitchAccount
 import androidx.compose.material.icons.filled.Sync
 import androidx.compose.material.icons.filled.Tune
 import androidx.compose.material.icons.filled.Videocam
@@ -80,6 +82,7 @@ fun SettingsScreen(
     val audioConfig by viewModel.audioConfig.collectAsState()
     val youTubeChannelInfo by viewModel.youTubeChannelInfo.collectAsState()
     val isYouTubeSyncing by viewModel.isYouTubeSyncing.collectAsState()
+    val authError by viewModel.authError.collectAsState()
     val liveChatSettings by viewModel.liveChatSettings.collectAsState()
     val hwProfile = viewModel.hardwareProfile
     val context = LocalContext.current
@@ -109,6 +112,7 @@ fun SettingsScreen(
         }
 
         // Section 0: YouTube Channel & OAuth Synchronization
+        // Section 0: Google Account & YouTube Live Synchronization
         Card(
             modifier = Modifier.fillMaxWidth(),
             colors = CardDefaults.cardColors(containerColor = ViperSurfaceCard),
@@ -123,7 +127,7 @@ fun SettingsScreen(
                     Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                         Icon(Icons.Default.AccountCircle, contentDescription = null, tint = Color(0xFFFF0000), modifier = Modifier.size(20.dp))
                         Text(
-                            text = "YOUTUBE CHANNEL & BROADCAST SYNC",
+                            text = "GOOGLE ACCOUNT & YOUTUBE SYNC",
                             fontSize = 12.sp,
                             fontWeight = FontWeight.Bold,
                             color = TextPrimary
@@ -132,30 +136,67 @@ fun SettingsScreen(
                     if (youTubeChannelInfo.isConnected) {
                         Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(4.dp)) {
                             Icon(Icons.Default.CheckCircle, contentDescription = null, tint = ViperGreen, modifier = Modifier.size(14.dp))
-                            Text("CONNECTED", fontSize = 10.sp, fontWeight = FontWeight.Bold, color = ViperGreen)
+                            Text(
+                                text = if (youTubeChannelInfo.isYouTubeAuthorized) "YOUTUBE LINKED" else "ACCOUNT LINKED",
+                                fontSize = 10.sp,
+                                fontWeight = FontWeight.Bold,
+                                color = ViperGreen
+                            )
+                        }
+                    }
+                }
+
+                // Authentication error warning
+                if (authError != null) {
+                    Card(
+                        modifier = Modifier.fillMaxWidth(),
+                        colors = CardDefaults.cardColors(containerColor = Color(0xFF33141E)),
+                        shape = RoundedCornerShape(8.dp)
+                    ) {
+                        Row(
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .padding(10.dp),
+                            horizontalArrangement = Arrangement.SpaceBetween,
+                            verticalAlignment = Alignment.CenterVertically
+                        ) {
+                            Column(modifier = Modifier.weight(1f)) {
+                                Text("AUTHENTICATION MESSAGE", fontSize = 10.sp, fontWeight = FontWeight.Bold, color = Color(0xFFFF5252))
+                                Text(authError ?: "", fontSize = 11.sp, color = TextPrimary)
+                            }
+                            IconButton(onClick = { viewModel.clearAuthError() }) {
+                                Text("✕", color = Color.White, fontWeight = FontWeight.Bold, fontSize = 14.sp)
+                            }
                         }
                     }
                 }
 
                 if (!youTubeChannelInfo.isConnected) {
                     Text(
-                        text = "Connect with Google OAuth to authenticate your YouTube channel, auto-retrieve broadcast stream keys, and enable live chat synchronization.",
+                        text = "Sign in with Google to select your Gmail account. VIPER STUDIO will securely authenticate with Firebase and Google OAuth 2.0 without auto-selecting previous credentials.",
                         fontSize = 11.sp,
                         color = TextSecondary
                     )
 
                     Button(
                         onClick = { viewModel.signInWithGoogle(context) },
-                        colors = ButtonDefaults.buttonColors(containerColor = Color(0xFFFF0000), contentColor = Color.White),
+                        enabled = !isYouTubeSyncing,
+                        colors = ButtonDefaults.buttonColors(containerColor = Color(0xFF4285F4), contentColor = Color.White),
                         shape = RoundedCornerShape(8.dp),
                         modifier = Modifier.fillMaxWidth()
                     ) {
-                        Icon(Icons.Default.Sync, contentDescription = null, modifier = Modifier.size(16.dp))
-                        Spacer(modifier = Modifier.width(6.dp))
-                        Text("Sign In with Google (Connect YouTube)", fontSize = 12.sp, fontWeight = FontWeight.Bold)
+                        if (isYouTubeSyncing) {
+                            CircularProgressIndicator(modifier = Modifier.size(16.dp), color = Color.White, strokeWidth = 2.dp)
+                            Spacer(modifier = Modifier.width(8.dp))
+                            Text("Opening Account Picker...", fontSize = 12.sp, fontWeight = FontWeight.Bold)
+                        } else {
+                            Icon(Icons.Default.AccountCircle, contentDescription = null, modifier = Modifier.size(18.dp))
+                            Spacer(modifier = Modifier.width(6.dp))
+                            Text("Sign in with Google", fontSize = 12.sp, fontWeight = FontWeight.Bold)
+                        }
                     }
                 } else {
-                    // Connected Channel Details Card
+                    // Connected Channel Details Card (Real user account info)
                     Row(
                         modifier = Modifier
                             .fillMaxWidth()
@@ -171,7 +212,7 @@ fun SettingsScreen(
                                     .data(youTubeChannelInfo.avatarUrl)
                                     .crossfade(true)
                                     .build(),
-                                contentDescription = "Channel Avatar",
+                                contentDescription = "User Avatar",
                                 contentScale = ContentScale.Crop,
                                 modifier = Modifier
                                     .size(36.dp)
@@ -186,7 +227,7 @@ fun SettingsScreen(
                                 contentAlignment = Alignment.Center
                             ) {
                                 Text(
-                                    text = youTubeChannelInfo.channelTitle.take(1).uppercase(),
+                                    text = if (youTubeChannelInfo.channelTitle.isNotBlank()) youTubeChannelInfo.channelTitle.take(1).uppercase() else "G",
                                     fontSize = 16.sp,
                                     fontWeight = FontWeight.Bold,
                                     color = ViperCyan
@@ -196,16 +237,55 @@ fun SettingsScreen(
 
                         Column(modifier = Modifier.weight(1f)) {
                             Text(
-                                text = youTubeChannelInfo.channelTitle,
+                                text = if (youTubeChannelInfo.channelTitle.isNotBlank()) youTubeChannelInfo.channelTitle else youTubeChannelInfo.accountEmail,
                                 fontSize = 13.sp,
                                 fontWeight = FontWeight.Bold,
                                 color = TextPrimary
                             )
-                            Text(
-                                text = "${youTubeChannelInfo.channelHandle} • ${youTubeChannelInfo.subscriberCountText}",
-                                fontSize = 10.sp,
-                                color = TextMuted
-                            )
+                            if (youTubeChannelInfo.accountEmail.isNotBlank()) {
+                                Text(
+                                    text = youTubeChannelInfo.accountEmail,
+                                    fontSize = 10.sp,
+                                    color = ViperCyan
+                                )
+                            }
+                            if (youTubeChannelInfo.subscriberCountText.isNotBlank()) {
+                                Text(
+                                    text = "${youTubeChannelInfo.channelHandle} • ${youTubeChannelInfo.subscriberCountText}",
+                                    fontSize = 10.sp,
+                                    color = TextMuted
+                                )
+                            }
+                        }
+                    }
+
+                    // YouTube Permissions Request Card
+                    if (!youTubeChannelInfo.isYouTubeAuthorized) {
+                        Card(
+                            modifier = Modifier.fillMaxWidth(),
+                            colors = CardDefaults.cardColors(containerColor = Color(0xFF1C1217)),
+                            border = androidx.compose.foundation.BorderStroke(1.dp, Color(0x33FF0000)),
+                            shape = RoundedCornerShape(8.dp)
+                        ) {
+                            Column(modifier = Modifier.padding(10.dp), verticalArrangement = Arrangement.spacedBy(6.dp)) {
+                                Text("YOUTUBE LIVE PERMISSIONS", fontSize = 10.sp, fontWeight = FontWeight.Bold, color = Color(0xFFFF5252))
+                                Text(
+                                    "Request YouTube channel broadcast permissions to retrieve your stream keys and auto-detect live chats.",
+                                    fontSize = 11.sp,
+                                    color = TextSecondary
+                                )
+                                Button(
+                                    onClick = { viewModel.connectYouTubePermissions() },
+                                    enabled = !isYouTubeSyncing,
+                                    colors = ButtonDefaults.buttonColors(containerColor = Color(0xFFFF0000), contentColor = Color.White),
+                                    shape = RoundedCornerShape(6.dp),
+                                    modifier = Modifier.fillMaxWidth()
+                                ) {
+                                    Icon(Icons.Default.Link, contentDescription = null, modifier = Modifier.size(14.dp))
+                                    Spacer(modifier = Modifier.width(6.dp))
+                                    Text("Authorize YouTube Live", fontSize = 11.sp, fontWeight = FontWeight.Bold)
+                                }
+                            }
                         }
                     }
 
@@ -225,19 +305,19 @@ fun SettingsScreen(
                             color = ViperCyan
                         )
                         Text(
-                            text = youTubeChannelInfo.activeBroadcastTitle,
+                            text = if (youTubeChannelInfo.activeBroadcastTitle.isNotBlank()) youTubeChannelInfo.activeBroadcastTitle else "Ready for live stream",
                             fontSize = 11.sp,
                             fontWeight = FontWeight.SemiBold,
                             color = TextPrimary
                         )
                         Text(
-                            text = "Ingest URL: ${youTubeChannelInfo.rtmpIngestUrl}",
+                            text = "RTMP Ingest: ${youTubeChannelInfo.rtmpIngestUrl}",
                             fontSize = 9.sp,
                             color = TextMuted
                         )
                     }
 
-                    // Sync & Disconnect Buttons
+                    // Action buttons: Sync, Switch Account, Disconnect
                     Row(
                         modifier = Modifier.fillMaxWidth(),
                         horizontalArrangement = Arrangement.spacedBy(8.dp)
@@ -255,18 +335,31 @@ fun SettingsScreen(
                                 Icon(Icons.Default.Sync, contentDescription = null, modifier = Modifier.size(14.dp))
                             }
                             Spacer(modifier = Modifier.width(4.dp))
-                            Text("Sync Broadcast", fontSize = 11.sp, fontWeight = FontWeight.Bold)
+                            Text("Sync", fontSize = 11.sp, fontWeight = FontWeight.Bold)
                         }
 
                         OutlinedButton(
-                            onClick = { viewModel.disconnectYouTubeChannel() },
+                            onClick = { viewModel.switchGoogleAccount(context) },
+                            enabled = !isYouTubeSyncing,
+                            colors = ButtonDefaults.outlinedButtonColors(contentColor = ViperCyan),
+                            shape = RoundedCornerShape(8.dp),
+                            modifier = Modifier.weight(1.3f)
+                        ) {
+                            Icon(Icons.Default.SwitchAccount, contentDescription = null, modifier = Modifier.size(14.dp))
+                            Spacer(modifier = Modifier.width(4.dp))
+                            Text("Switch Account", fontSize = 10.sp, fontWeight = FontWeight.SemiBold)
+                        }
+
+                        OutlinedButton(
+                            onClick = { viewModel.disconnectAccount(context) },
+                            enabled = !isYouTubeSyncing,
                             colors = ButtonDefaults.outlinedButtonColors(contentColor = Color(0xFFFF5252)),
                             shape = RoundedCornerShape(8.dp),
                             modifier = Modifier.weight(1f)
                         ) {
                             Icon(Icons.Default.LinkOff, contentDescription = null, modifier = Modifier.size(14.dp))
                             Spacer(modifier = Modifier.width(4.dp))
-                            Text("Disconnect", fontSize = 11.sp)
+                            Text("Disconnect", fontSize = 10.sp, fontWeight = FontWeight.SemiBold)
                         }
                     }
                 }
@@ -430,6 +523,51 @@ fun SettingsScreen(
                         fontWeight = FontWeight.Bold,
                         color = TextPrimary
                     )
+                }
+
+                // Independent Audio Source Controls
+                Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        horizontalArrangement = Arrangement.SpaceBetween,
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        Column(modifier = Modifier.weight(1f)) {
+                            Text("Internal Game Audio (BGMI)", fontSize = 12.sp, color = TextPrimary, fontWeight = FontWeight.SemiBold)
+                            Text(
+                                text = if (audioConfig.isInternalAudioEnabled) "Active: Captures high-definition 48kHz game sound via MediaProjection" else "Disabled: Game audio muted completely from stream & recording",
+                                fontSize = 10.sp,
+                                color = if (audioConfig.isInternalAudioEnabled) ViperGreen else TextMuted
+                            )
+                        }
+                        Spacer(modifier = Modifier.width(8.dp))
+                        Switch(
+                            checked = audioConfig.isInternalAudioEnabled,
+                            onCheckedChange = { viewModel.toggleInternalAudio() },
+                            colors = SwitchDefaults.colors(checkedThumbColor = ViperGreen, checkedTrackColor = Color(0xFF00391A))
+                        )
+                    }
+
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        horizontalArrangement = Arrangement.SpaceBetween,
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        Column(modifier = Modifier.weight(1f)) {
+                            Text("Microphone Audio", fontSize = 12.sp, color = TextPrimary, fontWeight = FontWeight.SemiBold)
+                            Text(
+                                text = if (audioConfig.isMicAudioEnabled) "Active: Voice audio mixed with soft-clipping protection" else "Disabled: Microphone muted completely. Zero mic bleed into game sound",
+                                fontSize = 10.sp,
+                                color = if (audioConfig.isMicAudioEnabled) ViperCyan else TextMuted
+                            )
+                        }
+                        Spacer(modifier = Modifier.width(8.dp))
+                        Switch(
+                            checked = audioConfig.isMicAudioEnabled,
+                            onCheckedChange = { viewModel.toggleMicAudio() },
+                            colors = SwitchDefaults.colors(checkedThumbColor = ViperCyan, checkedTrackColor = Color(0xFF00363A))
+                        )
+                    }
                 }
 
                 // Audio Delay Adjustment Slider (-500ms to +500ms)

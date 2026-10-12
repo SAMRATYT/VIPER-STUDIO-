@@ -127,6 +127,7 @@ class ViperStudioViewModel(application: Application) : AndroidViewModel(applicat
     // YouTube OAuth & Channel Synchronization
     val youTubeChannelInfo: StateFlow<YouTubeChannelInfo> = ytEngine.channelInfo
     val isYouTubeSyncing: StateFlow<Boolean> = ytEngine.isSyncing
+    val authError: StateFlow<String?> = ytEngine.authError
 
     // Live Chat Feed (Synchronized with YouTube Live Chat & Offline viewer simulation)
     val chatMessages: StateFlow<List<ChatMessage>> = ytEngine.chatMessages
@@ -510,6 +511,8 @@ class ViperStudioViewModel(application: Application) : AndroidViewModel(applicat
     // Audio Mixer setters
     fun setGameVolume(volume: Float) = audioEngine.setGameVolume(volume)
     fun setMicVolume(volume: Float) = audioEngine.setMicVolume(volume)
+    fun toggleInternalAudio() = audioEngine.toggleInternalAudio()
+    fun toggleMicAudio() = audioEngine.toggleMicAudio()
     fun toggleMicMute() = audioEngine.toggleMicMute()
     fun toggleNoiseSuppression() = audioEngine.toggleNoiseSuppression()
     fun toggleEchoCancellation() = audioEngine.toggleEchoCancellation()
@@ -677,13 +680,13 @@ class ViperStudioViewModel(application: Application) : AndroidViewModel(applicat
         ytEngine.sendChatMessage(text)
     }
 
-    // YouTube Channel Connection & OAuth
+    // YouTube Channel Connection & Google OAuth
     fun signInWithGoogle(
         context: Context,
         onSuccess: (YouTubeChannelInfo) -> Unit = {},
         onError: (String) -> Unit = {}
     ) {
-        ytEngine.signInWithGoogle(context, { channel ->
+        ytEngine.signInWithGoogle(context, forceSwitchAccount = false, onSuccess = { channel ->
             if (channel.streamKey.isNotBlank()) {
                 _streamConfig.value = _streamConfig.value.copy(
                     streamKey = channel.streamKey,
@@ -691,11 +694,46 @@ class ViperStudioViewModel(application: Application) : AndroidViewModel(applicat
                 )
             }
             onSuccess(channel)
-        }, onError)
+        }, onError = onError)
     }
 
-    fun disconnectYouTubeChannel() {
-        ytEngine.disconnectChannel()
+    fun switchGoogleAccount(
+        context: Context,
+        onSuccess: (YouTubeChannelInfo) -> Unit = {},
+        onError: (String) -> Unit = {}
+    ) {
+        ytEngine.switchGoogleAccount(context, onSuccess = { channel ->
+            if (channel.streamKey.isNotBlank()) {
+                _streamConfig.value = _streamConfig.value.copy(
+                    streamKey = channel.streamKey,
+                    rtmpUrl = channel.rtmpIngestUrl.ifBlank { "rtmp://a.rtmp.youtube.com/live2" }
+                )
+            }
+            onSuccess(channel)
+        }, onError = onError)
+    }
+
+    fun disconnectAccount(context: Context) {
+        ytEngine.disconnectAccount(context)
+    }
+
+    fun connectYouTubePermissions(
+        onSuccess: (YouTubeChannelInfo) -> Unit = {},
+        onError: (String) -> Unit = {}
+    ) {
+        ytEngine.connectYouTubePermissions(onSuccess = { channel ->
+            if (channel.streamKey.isNotBlank()) {
+                _streamConfig.value = _streamConfig.value.copy(
+                    streamKey = channel.streamKey,
+                    rtmpUrl = channel.rtmpIngestUrl.ifBlank { "rtmp://a.rtmp.youtube.com/live2" }
+                )
+            }
+            onSuccess(channel)
+        }, onError = onError)
+    }
+
+    fun clearAuthError() {
+        ytEngine.clearAuthError()
     }
 
     fun syncYouTubeBroadcast(onComplete: (Boolean) -> Unit = {}) {

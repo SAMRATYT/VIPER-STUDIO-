@@ -539,6 +539,25 @@ fun StudioScreen(
                     }
                 }
 
+                // Independent Internal Audio & Microphone Toggles
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.spacedBy(8.dp)
+                ) {
+                    QuickHudPill(
+                        label = if (audioConfig.isInternalAudioEnabled) "Internal Audio: ON" else "Internal Audio: OFF",
+                        isActive = audioConfig.isInternalAudioEnabled,
+                        onClick = { viewModel.toggleInternalAudio() },
+                        modifier = Modifier.weight(1f)
+                    )
+                    QuickHudPill(
+                        label = if (audioConfig.isMicAudioEnabled) "Microphone: ON" else "Microphone: OFF",
+                        isActive = audioConfig.isMicAudioEnabled,
+                        onClick = { viewModel.toggleMicAudio() },
+                        modifier = Modifier.weight(1f)
+                    )
+                }
+
                 // Game Audio Slider
                 Column {
                     Row(
@@ -546,11 +565,17 @@ fun StudioScreen(
                         horizontalArrangement = Arrangement.SpaceBetween
                     ) {
                         Text("Internal Game Audio", fontSize = 12.sp, color = TextPrimary)
-                        Text("${(audioConfig.gameAudioVolume * 100).toInt()}%", fontSize = 12.sp, color = ViperGreen, fontWeight = FontWeight.Bold)
+                        Text(
+                            text = if (!audioConfig.isInternalAudioEnabled) "OFF" else "${(audioConfig.gameAudioVolume * 100).toInt()}%",
+                            fontSize = 12.sp,
+                            color = if (!audioConfig.isInternalAudioEnabled) Color.Gray else ViperGreen,
+                            fontWeight = FontWeight.Bold
+                        )
                     }
                     Slider(
                         value = audioConfig.gameAudioVolume,
                         onValueChange = { viewModel.setGameVolume(it) },
+                        enabled = audioConfig.isInternalAudioEnabled,
                         valueRange = 0f..2f,
                         colors = SliderDefaults.colors(
                             thumbColor = ViperGreen,
@@ -568,15 +593,16 @@ fun StudioScreen(
                     ) {
                         Text("Microphone Voice", fontSize = 12.sp, color = TextPrimary)
                         Text(
-                            if (audioConfig.isMicMuted) "MUTED" else "${(audioConfig.micAudioVolume * 100).toInt()}%",
+                            text = if (!audioConfig.isMicAudioEnabled) "OFF" else if (audioConfig.isMicMuted) "MUTED" else "${(audioConfig.micAudioVolume * 100).toInt()}%",
                             fontSize = 12.sp,
-                            color = if (audioConfig.isMicMuted) Color(0xFFFF5252) else ViperCyan,
+                            color = if (!audioConfig.isMicAudioEnabled) Color.Gray else if (audioConfig.isMicMuted) Color(0xFFFF5252) else ViperCyan,
                             fontWeight = FontWeight.Bold
                         )
                     }
                     Slider(
                         value = audioConfig.micAudioVolume,
                         onValueChange = { viewModel.setMicVolume(it) },
+                        enabled = audioConfig.isMicAudioEnabled && !audioConfig.isMicMuted,
                         valueRange = 0f..2f,
                         colors = SliderDefaults.colors(
                             thumbColor = ViperCyan,

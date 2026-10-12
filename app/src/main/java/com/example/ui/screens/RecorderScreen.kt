@@ -98,6 +98,7 @@ fun RecorderScreen(
     val lastSavedRecording by viewModel.lastSavedRecording.collectAsState()
     val streamConfig by viewModel.streamConfig.collectAsState()
     val recordings by viewModel.recordingsList.collectAsState()
+    val audioConfig by viewModel.audioConfig.collectAsState()
     val context = LocalContext.current
 
     val infiniteTransition = rememberInfiniteTransition(label = "rec_pulse")
@@ -409,6 +410,63 @@ fun RecorderScreen(
                                     color = if (isSelected) Color.Black else TextPrimary
                                 )
                             }
+                        }
+                    }
+                }
+            }
+
+            // Audio Sources for Recording (Game Audio vs Microphone)
+            Card(
+                modifier = Modifier.fillMaxWidth(),
+                colors = CardDefaults.cardColors(containerColor = ViperSurfaceCard),
+                shape = RoundedCornerShape(12.dp)
+            ) {
+                Column(modifier = Modifier.padding(14.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                    Text(
+                        text = "RECORDING AUDIO SOURCES",
+                        fontSize = 11.sp,
+                        fontWeight = FontWeight.Bold,
+                        color = TextSecondary
+                    )
+
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        horizontalArrangement = Arrangement.spacedBy(8.dp)
+                    ) {
+                        Box(
+                            modifier = Modifier
+                                .weight(1f)
+                                .clip(RoundedCornerShape(8.dp))
+                                .background(if (audioConfig.isInternalAudioEnabled) Color(0xFF132A1C) else Color(0xFF131A28))
+                                .border(1.dp, if (audioConfig.isInternalAudioEnabled) ViperGreen else Color(0xFF243046), RoundedCornerShape(8.dp))
+                                .clickable { viewModel.toggleInternalAudio() }
+                                .padding(horizontal = 10.dp, vertical = 8.dp),
+                            contentAlignment = Alignment.Center
+                        ) {
+                            Text(
+                                text = if (audioConfig.isInternalAudioEnabled) "Internal Audio: ON" else "Internal Audio: OFF",
+                                fontSize = 11.sp,
+                                fontWeight = FontWeight.Bold,
+                                color = if (audioConfig.isInternalAudioEnabled) ViperGreen else TextSecondary
+                            )
+                        }
+
+                        Box(
+                            modifier = Modifier
+                                .weight(1f)
+                                .clip(RoundedCornerShape(8.dp))
+                                .background(if (audioConfig.isMicAudioEnabled) Color(0xFF0F2B30) else Color(0xFF131A28))
+                                .border(1.dp, if (audioConfig.isMicAudioEnabled) ViperCyan else Color(0xFF243046), RoundedCornerShape(8.dp))
+                                .clickable { viewModel.toggleMicAudio() }
+                                .padding(horizontal = 10.dp, vertical = 8.dp),
+                            contentAlignment = Alignment.Center
+                        ) {
+                            Text(
+                                text = if (audioConfig.isMicAudioEnabled) "Microphone: ON" else "Microphone: OFF",
+                                fontSize = 11.sp,
+                                fontWeight = FontWeight.Bold,
+                                color = if (audioConfig.isMicAudioEnabled) ViperCyan else TextSecondary
+                            )
                         }
                     }
                 }

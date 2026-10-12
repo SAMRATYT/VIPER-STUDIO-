@@ -131,11 +131,17 @@ class ScreenCaptureEncoder(private val context: Context) : AudioRouteChangeListe
     // Real-Time Audio Settings (Thread-safe)
     @Volatile var micVolume: Float = 1.2f
     @Volatile var gameVolume: Float = 1.0f
+    @Volatile var isInternalAudioEnabled: Boolean = true
+    @Volatile var isMicAudioEnabled: Boolean = true
     @Volatile var isMicMuted: Boolean = false
     @Volatile var audioDelayMs: Int = 0
     @Volatile var captureMode: AudioCaptureMode = AudioCaptureMode.INTERNAL_AND_MIC
     @Volatile var isNoiseSuppressionEnabled: Boolean = true
     @Volatile var isEchoCancellationEnabled: Boolean = true
+
+    // Audio Capture Error and Restriction State
+    @Volatile var audioCaptureError: String? = null
+    @Volatile var isPlaybackCaptureBlocked: Boolean = false
 
     // Hardware Audio Effects (Applied to microphone only, keeping internal game audio untouched)
     private var micNoiseSuppressor: NoiseSuppressor? = null
@@ -152,10 +158,13 @@ class ScreenCaptureEncoder(private val context: Context) : AudioRouteChangeListe
     // Diagnostic Counters
     private val audioEncoderQueueErrors = AtomicLong(0)
     private val audioAutoRecoveries = AtomicLong(0)
+    private val audioDroppedBuffers = AtomicLong(0)
 
     fun updateAudioConfig(config: AudioMixConfig) {
         micVolume = config.micAudioVolume
         gameVolume = config.gameAudioVolume
+        isInternalAudioEnabled = config.isInternalAudioEnabled
+        isMicAudioEnabled = config.isMicAudioEnabled
         isMicMuted = config.isMicMuted
         audioDelayMs = config.audioDelayMs
         captureMode = config.audioCaptureMode
@@ -163,7 +172,7 @@ class ScreenCaptureEncoder(private val context: Context) : AudioRouteChangeListe
         isEchoCancellationEnabled = config.isEchoCancellationEnabled
 
         applyMicHardwareEffects(config.isNoiseSuppressionEnabled, config.isEchoCancellationEnabled)
-        Log.d(TAG_AUDIO, "Audio config updated: mode=${captureMode.name}, micVol=$micVolume, gameVol=$gameVolume, muted=$isMicMuted, delay=${audioDelayMs}ms, noiseReduction=${config.isNoiseSuppressionEnabled}")
+        Log.d(TAG_AUDIO, "Audio config updated: mode=${captureMode.name}, internalEnabled=$isInternalAudioEnabled, micEnabled=$isMicAudioEnabled, micVol=$micVolume, gameVol=$gameVolume, muted=$isMicMuted, delay=${audioDelayMs}ms, noiseReduction=${config.isNoiseSuppressionEnabled}")
     }
 
     private fun applyMicHardwareEffects(enableNoiseReduction: Boolean, enableEchoCancellation: Boolean) {
@@ -256,6 +265,10 @@ class ScreenCaptureEncoder(private val context: Context) : AudioRouteChangeListe
         audioListeners.remove(listener)
         checkAutoStop()
     }
+
+    fun isAudioActive(): Boolean = isAudioRunning.get()
+    fun isVideoActive(): Boolean = isVideoRunning.get()
+    fun isCaptureRunning(): Boolean = isRunning.get()
 
     private fun checkAutoStop() {
         if (videoListeners.isEmpty() && audioListeners.isEmpty() && isRunning.get()) {
@@ -524,12 +537,11 @@ class ScreenCaptureEncoder(private val context: Context) : AudioRouteChangeListe
             }
 
             // Internal Game Audio Capture via MediaProjection AudioPlaybackCapture (API 29+)
-            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q && hasMicPerm) {
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
                 try {
                     val captureConfig = AudioPlaybackCaptureConfiguration.Builder(projection)
                         .addMatchingUsage(AudioAttributes.USAGE_GAME)
                         .addMatchingUsage(AudioAttributes.USAGE_MEDIA)
-                        .addMatchingUsage(AudioAttributes.USAGE_UNKNOWN)
                         .build()
 
                     val minBufGame = AudioRecord.getMinBufferSize(
@@ -554,14 +566,27 @@ class ScreenCaptureEncoder(private val context: Context) : AudioRouteChangeListe
                     if (gameRecord.state == AudioRecord.STATE_INITIALIZED) {
                         gameRecord.startRecording()
                         audioRecordGame = gameRecord
+                        isPlaybackCaptureBlocked = false
+                        audioCaptureError = null
                         Log.i(TAG_AUDIO, "AudioPlaybackCapture internal game audio successfully started at $SAMPLE_RATE Hz Stereo.")
                     } else {
-                        Log.w(TAG_AUDIO, "AudioPlaybackCapture state != INITIALIZED")
+                        isPlaybackCaptureBlocked = true
+                        val err = "AudioPlaybackCapture failed to initialize (State: ${gameRecord.state}). Android or game policy may restrict capture."
+                        audioCaptureError = err
+                        Log.w(TAG_AUDIO, err)
                         gameRecord.release()
                     }
                 } catch (e: Exception) {
-                    Log.i(TAG_AUDIO, "AudioPlaybackCapture restricted or unavailable: ${e.message}. Falling back to mic capture.")
+                    isPlaybackCaptureBlocked = true
+                    val err = "Android or BGMI audio playback capture restricted: ${e.message}"
+                    audioCaptureError = err
+                    Log.e(TAG_AUDIO, err, e)
                 }
+            } else {
+                isPlaybackCaptureBlocked = true
+                val err = "Internal audio capture requires Android 10+ (API 29+)."
+                audioCaptureError = err
+                Log.w(TAG_AUDIO, err)
             }
 
             // Initialize AAC-LC 48kHz Stereo Encoder (128 kbps)
@@ -661,10 +686,15 @@ class ScreenCaptureEncoder(private val context: Context) : AudioRouteChangeListe
                             if (isMono) {
                                 AudioProcessingUtils.upmixMonoToStereo(rawBuffer, read, stereoBuffer)
                                 micJitterBuffer.push(stereoBuffer)
-                                liveMicLevel = AudioProcessingUtils.calculateNormalizedLevel(stereoBuffer, read * 2)
+                                liveMicLevel = if (isMicMuted || !isMicAudioEnabled) 0f else AudioProcessingUtils.calculateNormalizedLevel(stereoBuffer, read * 2)
                             } else {
-                                micJitterBuffer.push(rawBuffer)
-                                liveMicLevel = AudioProcessingUtils.calculateNormalizedLevel(rawBuffer, read)
+                                if (read < rawBuffer.size) {
+                                    val partial = rawBuffer.copyOf(read)
+                                    micJitterBuffer.push(partial)
+                                } else {
+                                    micJitterBuffer.push(rawBuffer)
+                                }
+                                liveMicLevel = if (isMicMuted || !isMicAudioEnabled) 0f else AudioProcessingUtils.calculateNormalizedLevel(rawBuffer, read)
                             }
                         }
                         read == AudioRecord.ERROR_INVALID_OPERATION || read == AudioRecord.ERROR_DEAD_OBJECT -> {
@@ -679,7 +709,7 @@ class ScreenCaptureEncoder(private val context: Context) : AudioRouteChangeListe
                             audioRecordMic?.startRecording()
                         }
                         else -> {
-                            Thread.sleep(10)
+                            Thread.sleep(5)
                         }
                     }
                 } catch (e: Exception) {
@@ -712,15 +742,25 @@ class ScreenCaptureEncoder(private val context: Context) : AudioRouteChangeListe
                     val read = record.read(rawBuffer, 0, rawBuffer.size)
                     when {
                         read > 0 -> {
-                            gameJitterBuffer.push(rawBuffer)
-                            liveGameLevel = AudioProcessingUtils.calculateNormalizedLevel(rawBuffer, read)
+                            if (read < rawBuffer.size) {
+                                val partial = rawBuffer.copyOf(read)
+                                gameJitterBuffer.push(partial)
+                            } else {
+                                gameJitterBuffer.push(rawBuffer)
+                            }
+                            liveGameLevel = if (!isInternalAudioEnabled) 0f else AudioProcessingUtils.calculateNormalizedLevel(rawBuffer, read)
+                        }
+                        read == AudioRecord.ERROR_INVALID_OPERATION || read == AudioRecord.ERROR_DEAD_OBJECT -> {
+                            Log.w(TAG_AUDIO, "Game AudioPlaybackCapture error: $read. Attempting recovery...")
+                            audioAutoRecoveries.incrementAndGet()
+                            Thread.sleep(50)
                         }
                         read < 0 -> {
                             Log.w(TAG_AUDIO, "Game AudioPlaybackCapture read error: $read")
                             Thread.sleep(20)
                         }
                         else -> {
-                            Thread.sleep(10)
+                            Thread.sleep(5)
                         }
                     }
                 } catch (e: Exception) {
@@ -761,13 +801,15 @@ class ScreenCaptureEncoder(private val context: Context) : AudioRouteChangeListe
                     micJitterBuffer.poll(micPcm)
                     gameJitterBuffer.poll(gamePcm)
 
-                    // Software mixing with soft-clipping limiter and selectable mode
+                    // Software mixing with soft-clipping limiter and independent toggles
                     AudioProcessingUtils.mixStereoPcm(
                         micPcm = micPcm,
                         micVolume = micVolume,
                         isMicMuted = isMicMuted,
+                        isMicEnabled = isMicAudioEnabled,
                         gamePcm = gamePcm,
                         gameVolume = gameVolume,
+                        isInternalAudioEnabled = isInternalAudioEnabled,
                         outputPcm = mixedPcm,
                         mode = captureMode
                     )
@@ -783,12 +825,10 @@ class ScreenCaptureEncoder(private val context: Context) : AudioRouteChangeListe
                         val inBuffer = codec.getInputBuffer(inIndex)
                         if (inBuffer != null) {
                             inBuffer.clear()
-                            val byteBuffer = ByteBuffer.allocate(frameBytes)
-                            for (s in mixedPcm) {
-                                byteBuffer.putShort(s)
-                            }
-                            byteBuffer.flip()
-                            inBuffer.put(byteBuffer)
+                            val shortBuffer = inBuffer.asShortBuffer()
+                            shortBuffer.put(mixedPcm)
+                            inBuffer.position(0)
+                            inBuffer.limit(frameBytes)
 
                             codec.queueInputBuffer(inIndex, 0, frameBytes, ptsUs, 0)
                             totalAudioFramesWritten.addAndGet(AudioProcessingUtils.FRAME_SIZE_STEREO_SAMPLES.toLong())
@@ -803,10 +843,10 @@ class ScreenCaptureEncoder(private val context: Context) : AudioRouteChangeListe
                         val driftMs = ((System.nanoTime() / 1000L - ptsUs) / 1000L)
                         Log.i(
                             TAG_DIAGNOSTICS,
-                            "Audio Status: Mode=${captureMode.name}, Pts=$ptsUs us, Drift=${driftMs}ms, " +
+                            "Audio Status: Mode=${captureMode.name}, InternalOn=$isInternalAudioEnabled, MicOn=$isMicAudioEnabled, Pts=$ptsUs us, Drift=${driftMs}ms, " +
                                 "MicUnderruns=${micJitterBuffer.underrunsCount.get()}, MicOverruns=${micJitterBuffer.overrunsCount.get()}, " +
                                 "GameUnderruns=${gameJitterBuffer.underrunsCount.get()}, GameOverruns=${gameJitterBuffer.overrunsCount.get()}, " +
-                                "QueueErrors=${audioEncoderQueueErrors.get()}, Recoveries=${audioAutoRecoveries.get()}"
+                                "QueueErrors=${audioEncoderQueueErrors.get()}, Recoveries=${audioAutoRecoveries.get()}, Dropped=${audioDroppedBuffers.get()}"
                         )
                     }
                 } catch (e: Exception) {

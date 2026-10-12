@@ -21,10 +21,12 @@ import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.filled.AccountCircle
 import androidx.compose.material.icons.filled.CastConnected
 import androidx.compose.material.icons.filled.CheckCircle
 import androidx.compose.material.icons.filled.FiberManualRecord
 import androidx.compose.material.icons.filled.Layers
+import androidx.compose.material.icons.filled.LinkOff
 import androidx.compose.material.icons.filled.LiveTv
 import androidx.compose.material.icons.filled.Memory
 import androidx.compose.material.icons.filled.Mic
@@ -33,6 +35,7 @@ import androidx.compose.material.icons.filled.NotificationsActive
 import androidx.compose.material.icons.filled.PlayArrow
 import androidx.compose.material.icons.filled.RadioButtonChecked
 import androidx.compose.material.icons.filled.Stop
+import androidx.compose.material.icons.filled.SwitchAccount
 import androidx.compose.material.icons.filled.VideoLibrary
 import androidx.compose.material3.Button
 import androidx.compose.material3.ButtonDefaults
@@ -89,7 +92,11 @@ fun HomeScreen(
     val scenes by viewModel.scenes.collectAsState()
     val activeScene by viewModel.activeScene.collectAsState()
     val recordings by viewModel.recordingsList.collectAsState()
+    val youTubeChannelInfo by viewModel.youTubeChannelInfo.collectAsState()
+    val isYouTubeSyncing by viewModel.isYouTubeSyncing.collectAsState()
+    val authError by viewModel.authError.collectAsState()
     val hwProfile = viewModel.hardwareProfile
+    val context = androidx.compose.ui.platform.LocalContext.current
 
     Column(
         modifier = modifier
@@ -184,6 +191,118 @@ fun HomeScreen(
 
         // Live Telemetry Bar
         TelemetryBadgeBar(stats = streamStats)
+
+        // Google Account & YouTube Live Status Card
+        Card(
+            modifier = Modifier.fillMaxWidth(),
+            colors = CardDefaults.cardColors(containerColor = ViperSurfaceCard),
+            shape = RoundedCornerShape(12.dp)
+        ) {
+            Column(modifier = Modifier.padding(12.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.SpaceBetween,
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+                        Icon(Icons.Default.AccountCircle, contentDescription = null, tint = if (youTubeChannelInfo.isConnected) ViperGreen else Color(0xFF4285F4), modifier = Modifier.size(18.dp))
+                        Text(
+                            text = if (youTubeChannelInfo.isConnected) "GOOGLE ACCOUNT CONNECTED" else "GOOGLE ACCOUNT",
+                            fontSize = 11.sp,
+                            fontWeight = FontWeight.Bold,
+                            color = TextSecondary
+                        )
+                    }
+
+                    if (youTubeChannelInfo.isConnected) {
+                        Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(4.dp)) {
+                            Icon(Icons.Default.CheckCircle, contentDescription = null, tint = ViperGreen, modifier = Modifier.size(12.dp))
+                            Text(
+                                text = if (youTubeChannelInfo.isYouTubeAuthorized) "YOUTUBE ACTIVE" else "LINKED",
+                                fontSize = 10.sp,
+                                fontWeight = FontWeight.Bold,
+                                color = ViperGreen
+                            )
+                        }
+                    }
+                }
+
+                if (!youTubeChannelInfo.isConnected) {
+                    Text(
+                        text = "Sign in with Google to select your Gmail account and connect YouTube broadcasts.",
+                        fontSize = 11.sp,
+                        color = TextMuted
+                    )
+
+                    Button(
+                        onClick = { viewModel.signInWithGoogle(context) },
+                        enabled = !isYouTubeSyncing,
+                        colors = ButtonDefaults.buttonColors(containerColor = Color(0xFF4285F4), contentColor = Color.White),
+                        shape = RoundedCornerShape(8.dp),
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .height(40.dp)
+                            .testTag("home_google_sign_in_button")
+                    ) {
+                        if (isYouTubeSyncing) {
+                            Text("Opening Account Picker...", fontSize = 11.sp, fontWeight = FontWeight.Bold)
+                        } else {
+                            Icon(Icons.Default.AccountCircle, contentDescription = null, modifier = Modifier.size(16.dp))
+                            Spacer(modifier = Modifier.width(6.dp))
+                            Text("Sign in with Google", fontSize = 12.sp, fontWeight = FontWeight.Bold)
+                        }
+                    }
+                } else {
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        horizontalArrangement = Arrangement.SpaceBetween,
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        Column(modifier = Modifier.weight(1f)) {
+                            Text(
+                                text = if (youTubeChannelInfo.channelTitle.isNotBlank()) youTubeChannelInfo.channelTitle else youTubeChannelInfo.accountEmail,
+                                fontSize = 12.sp,
+                                fontWeight = FontWeight.Bold,
+                                color = TextPrimary
+                            )
+                            if (youTubeChannelInfo.accountEmail.isNotBlank()) {
+                                Text(
+                                    text = youTubeChannelInfo.accountEmail,
+                                    fontSize = 10.sp,
+                                    color = ViperCyan
+                                )
+                            }
+                        }
+
+                        Row(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+                            OutlinedButton(
+                                onClick = { viewModel.switchGoogleAccount(context) },
+                                colors = ButtonDefaults.outlinedButtonColors(contentColor = ViperCyan),
+                                shape = RoundedCornerShape(6.dp),
+                                contentPadding = androidx.compose.foundation.layout.PaddingValues(horizontal = 8.dp, vertical = 4.dp),
+                                modifier = Modifier.height(32.dp)
+                            ) {
+                                Icon(Icons.Default.SwitchAccount, contentDescription = null, modifier = Modifier.size(12.dp))
+                                Spacer(modifier = Modifier.width(4.dp))
+                                Text("Switch", fontSize = 10.sp)
+                            }
+
+                            OutlinedButton(
+                                onClick = { viewModel.disconnectAccount(context) },
+                                colors = ButtonDefaults.outlinedButtonColors(contentColor = Color(0xFFFF5252)),
+                                shape = RoundedCornerShape(6.dp),
+                                contentPadding = androidx.compose.foundation.layout.PaddingValues(horizontal = 8.dp, vertical = 4.dp),
+                                modifier = Modifier.height(32.dp)
+                            ) {
+                                Icon(Icons.Default.LinkOff, contentDescription = null, modifier = Modifier.size(12.dp))
+                                Spacer(modifier = Modifier.width(4.dp))
+                                Text("Disconnect", fontSize = 10.sp)
+                            }
+                        }
+                    }
+                }
+            }
+        }
 
         // Hero Action Cards (Broadcast vs Screen Record)
         Row(
@@ -381,7 +500,9 @@ fun HomeScreen(
             DualChannelVUMeter(
                 gameLevel = gameLevel,
                 micLevel = micLevel,
-                isMicMuted = audioConfig.isMicMuted
+                isMicMuted = audioConfig.isMicMuted,
+                isInternalAudioEnabled = audioConfig.isInternalAudioEnabled,
+                isMicAudioEnabled = audioConfig.isMicAudioEnabled
             )
         }
 
