@@ -503,16 +503,18 @@ class RtmpStreamEngine(private val context: Context) {
 
             // 7. Metadata (@setDataFrame / onMetaData)
             val res = currentConfig.resolution
+            val streamWidth = if (currentConfig.isLandscape) res.width else res.height
+            val streamHeight = if (currentConfig.isLandscape) res.height else res.width
             val metaData = mapOf(
                 "duration" to 0.0,
-                "width" to res.width.toDouble(),
-                "height" to res.height.toDouble(),
+                "width" to streamWidth.toDouble(),
+                "height" to streamHeight.toDouble(),
                 "videocodecid" to 7.0, // AVC / H.264
                 "videodatarate" to currentConfig.bitrateKbps.toDouble(),
                 "framerate" to currentConfig.fps.value.toDouble(),
                 "audiocodecid" to 10.0, // AAC
                 "audiodatarate" to 128.0,
-                "audiosamplerate" to 44100.0,
+                "audiosamplerate" to 48000.0,
                 "audiosamplesize" to 16.0,
                 "stereo" to true,
                 "encoder" to "VIPER STUDIO (Android 16 Qualcomm)"
@@ -528,8 +530,8 @@ class RtmpStreamEngine(private val context: Context) {
             val avcSeqHeader = createAvcSequenceHeader(res)
             RtmpProtocol.writeChunk(out, RtmpProtocol.CSID_VIDEO, 0, RtmpProtocol.MSG_VIDEO, activeStreamId, avcSeqHeader)
 
-            // 9. AAC Audio Sequence Header (AudioSpecificConfig: AAC-LC 44.1kHz Stereo)
-            val aacSeqHeader = byteArrayOf(0xAF.toByte(), 0x00.toByte(), 0x12.toByte(), 0x10.toByte())
+            // 9. AAC Audio Sequence Header (AudioSpecificConfig: AAC-LC 48kHz Stereo: 0x11, 0x90)
+            val aacSeqHeader = byteArrayOf(0xAF.toByte(), 0x00.toByte(), 0x11.toByte(), 0x90.toByte())
             RtmpProtocol.writeChunk(out, RtmpProtocol.CSID_AUDIO, 0, RtmpProtocol.MSG_AUDIO, activeStreamId, aacSeqHeader)
 
             isLiveVerified = true
@@ -566,7 +568,7 @@ class RtmpStreamEngine(private val context: Context) {
             Log.i(TAG, "Attaching ScreenCaptureEncoder for real hardware screen capture to RTMP.")
             encoder.registerVideoListener(videoFrameListener)
             encoder.registerAudioListener(audioFrameListener)
-            encoder.startCapture(projection, currentConfig.resolution, targetFps, currentConfig.bitrateKbps)
+            encoder.startCapture(projection, currentConfig.resolution, targetFps, currentConfig.bitrateKbps, currentConfig.isLandscape)
         }
 
         try {

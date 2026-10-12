@@ -79,6 +79,7 @@ fun StudioScreen(
     modifier: Modifier = Modifier
 ) {
     val activeScene by viewModel.activeScene.collectAsState()
+    val streamConfig by viewModel.streamConfig.collectAsState()
     val streamStats by viewModel.streamStats.collectAsState()
     val audioConfig by viewModel.audioConfig.collectAsState()
     val micLevel by viewModel.micLevel.collectAsState()
@@ -102,11 +103,47 @@ fun StudioScreen(
         // Telemetry Monitor
         TelemetryBadgeBar(stats = streamStats)
 
+        // Viewport Header & Orientation Toggle
+        Row(
+            modifier = Modifier.fillMaxWidth(),
+            horizontalArrangement = Arrangement.SpaceBetween,
+            verticalAlignment = Alignment.CenterVertically
+        ) {
+            Text(
+                text = if (streamConfig.isLandscape) "BROADCAST VIEWPORT (16:9 LANDSCAPE)" else "BROADCAST VIEWPORT (9:16 VERTICAL)",
+                fontSize = 11.sp,
+                fontWeight = FontWeight.Bold,
+                color = if (streamConfig.isLandscape) ViperGreen else ViperCyan
+            )
+            Box(
+                modifier = Modifier
+                    .clip(RoundedCornerShape(6.dp))
+                    .background(Color(0xFF131A28))
+                    .border(1.dp, Color(0xFF263348), RoundedCornerShape(6.dp))
+                    .clickable { viewModel.toggleOrientation() }
+                    .padding(horizontal = 8.dp, vertical = 4.dp)
+            ) {
+                Text(
+                    text = if (streamConfig.isLandscape) "Switch to 9:16" else "Switch to 16:9",
+                    fontSize = 10.sp,
+                    color = ViperCyan,
+                    fontWeight = FontWeight.SemiBold
+                )
+            }
+        }
+
         // Studio Viewport (Broadcast Output Monitor)
         Box(
-            modifier = Modifier
-                .fillMaxWidth()
-                .aspectRatio(16f / 9f)
+            modifier = (if (streamConfig.isLandscape) {
+                Modifier
+                    .fillMaxWidth()
+                    .aspectRatio(16f / 9f)
+            } else {
+                Modifier
+                    .fillMaxWidth(0.68f)
+                    .aspectRatio(9f / 16f)
+                    .align(Alignment.CenterHorizontally)
+            })
                 .clip(RoundedCornerShape(14.dp))
                 .border(2.dp, if (streamStats.isStreaming) LiveRed else ViperGreen, RoundedCornerShape(14.dp))
                 .background(Color(0xFF0E1422))

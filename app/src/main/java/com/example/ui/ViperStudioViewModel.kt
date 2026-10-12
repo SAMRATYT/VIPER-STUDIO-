@@ -54,16 +54,13 @@ class ViperStudioViewModel(application: Application) : AndroidViewModel(applicat
     private val recorderManager = app.screenRecorderManager
     private val db = app.database
 
+    private val prefsRepo = app.preferencesRepository
+
     // Hardware Profile
     val hardwareProfile: DeviceHardwareProfile = HardwareEncoderDetector.detectHardwareProfile()
 
-    // Stream Configuration
-    private val _streamConfig = MutableStateFlow(
-        StreamConfig(
-            bitrateKbps = hardwareProfile.recommendedBitrateKbps,
-            resolution = if (hardwareProfile.hasHardwareAvc) ResolutionOption.RES_720P else ResolutionOption.RES_480P
-        )
-    )
+    // Stream Configuration (Persisted across restarts)
+    private val _streamConfig = MutableStateFlow(prefsRepo.loadStreamConfig())
     val streamConfig: StateFlow<StreamConfig> = _streamConfig.asStateFlow()
 
     // Telemetry & Stats
@@ -304,64 +301,94 @@ class ViperStudioViewModel(application: Application) : AndroidViewModel(applicat
 
     // Stream Config setters
     fun setPlatform(platform: PlatformType) {
-        _streamConfig.value = _streamConfig.value.copy(
+        val updated = _streamConfig.value.copy(
             platform = platform,
             rtmpUrl = platform.defaultRtmpUrl
         )
+        _streamConfig.value = updated
+        prefsRepo.saveStreamConfig(updated)
     }
 
     fun setStreamKey(key: String) {
-        _streamConfig.value = _streamConfig.value.copy(streamKey = key)
+        val updated = _streamConfig.value.copy(streamKey = key)
+        _streamConfig.value = updated
+        prefsRepo.saveStreamConfig(updated)
     }
 
     fun setRtmpUrl(url: String) {
-        _streamConfig.value = _streamConfig.value.copy(rtmpUrl = url)
+        val updated = _streamConfig.value.copy(rtmpUrl = url)
+        _streamConfig.value = updated
+        prefsRepo.saveStreamConfig(updated)
     }
 
     fun setStreamTitle(title: String) {
-        _streamConfig.value = _streamConfig.value.copy(streamTitle = title)
+        val updated = _streamConfig.value.copy(streamTitle = title)
+        _streamConfig.value = updated
+        prefsRepo.saveStreamConfig(updated)
     }
 
     fun setStreamDescription(desc: String) {
-        _streamConfig.value = _streamConfig.value.copy(streamDescription = desc)
+        val updated = _streamConfig.value.copy(streamDescription = desc)
+        _streamConfig.value = updated
+        prefsRepo.saveStreamConfig(updated)
     }
 
     fun setGameCategory(cat: String) {
-        _streamConfig.value = _streamConfig.value.copy(gameCategory = cat)
+        val updated = _streamConfig.value.copy(gameCategory = cat)
+        _streamConfig.value = updated
+        prefsRepo.saveStreamConfig(updated)
     }
 
     fun setResolution(res: ResolutionOption) {
-        _streamConfig.value = _streamConfig.value.copy(
+        val updated = _streamConfig.value.copy(
             resolution = res,
             bitrateKbps = res.recommendedBitrate
         )
+        _streamConfig.value = updated
+        prefsRepo.saveStreamConfig(updated)
     }
 
     fun setFps(fps: FpsOption) {
-        _streamConfig.value = _streamConfig.value.copy(fps = fps)
+        val updated = _streamConfig.value.copy(fps = fps)
+        _streamConfig.value = updated
+        prefsRepo.saveStreamConfig(updated)
     }
 
     fun setBitrate(kbps: Int) {
-        _streamConfig.value = _streamConfig.value.copy(bitrateKbps = kbps)
+        val updated = _streamConfig.value.copy(bitrateKbps = kbps)
+        _streamConfig.value = updated
+        prefsRepo.saveStreamConfig(updated)
     }
 
     fun setCodec(codec: VideoCodecType) {
-        _streamConfig.value = _streamConfig.value.copy(codec = codec)
+        val updated = _streamConfig.value.copy(codec = codec)
+        _streamConfig.value = updated
+        prefsRepo.saveStreamConfig(updated)
     }
 
     fun toggleAdaptiveBitrate() {
         val current = _streamConfig.value.isAdaptiveBitrateEnabled
-        _streamConfig.value = _streamConfig.value.copy(isAdaptiveBitrateEnabled = !current)
+        val updated = _streamConfig.value.copy(isAdaptiveBitrateEnabled = !current)
+        _streamConfig.value = updated
+        prefsRepo.saveStreamConfig(updated)
     }
 
     fun toggleLowLatency() {
         val current = _streamConfig.value.isLowLatencyEnabled
-        _streamConfig.value = _streamConfig.value.copy(isLowLatencyEnabled = !current)
+        val updated = _streamConfig.value.copy(isLowLatencyEnabled = !current)
+        _streamConfig.value = updated
+        prefsRepo.saveStreamConfig(updated)
+    }
+
+    fun setOrientation(isLandscape: Boolean) {
+        val updated = _streamConfig.value.copy(isLandscape = isLandscape)
+        _streamConfig.value = updated
+        prefsRepo.saveStreamConfig(updated)
     }
 
     fun toggleOrientation() {
         val current = _streamConfig.value.isLandscape
-        _streamConfig.value = _streamConfig.value.copy(isLandscape = !current)
+        setOrientation(!current)
     }
 
     // Audio Mixer setters
@@ -482,7 +509,8 @@ class ViperStudioViewModel(application: Application) : AndroidViewModel(applicat
         } else if (!StreamForegroundService.isServiceRunning) {
             StreamForegroundService.startServiceCameraOnly(app, "Screen Recording (MP4)")
         }
-        recorderManager.startRecording(_streamConfig.value.resolution)
+        val cfg = _streamConfig.value
+        recorderManager.startRecording(cfg.resolution, cfg.isLandscape)
     }
 
     fun pauseScreenRecording() {

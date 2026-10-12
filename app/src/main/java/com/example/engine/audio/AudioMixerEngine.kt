@@ -36,7 +36,9 @@ class AudioMixerEngine(private val context: Context) {
     private var echoCanceler: AcousticEchoCanceler? = null
     private var noiseSuppressor: NoiseSuppressor? = null
 
-    private val _config = MutableStateFlow(AudioMixConfig())
+    private val prefsRepo = com.example.data.local.AppPreferencesRepository(context)
+
+    private val _config = MutableStateFlow(prefsRepo.loadAudioConfig())
     val config: StateFlow<AudioMixConfig> = _config.asStateFlow()
 
     private val _micLevel = MutableStateFlow(0f)
@@ -44,6 +46,11 @@ class AudioMixerEngine(private val context: Context) {
 
     private val _gameLevel = MutableStateFlow(0f)
     val gameLevel: StateFlow<Float> = _gameLevel.asStateFlow()
+
+    init {
+        // Synchronize initial restored preferences with hardware encoder
+        syncWithEncoder(_config.value)
+    }
 
     fun updateConfig(newConfig: AudioMixConfig) {
         _config.value = newConfig
@@ -100,6 +107,7 @@ class AudioMixerEngine(private val context: Context) {
 
     private fun syncWithEncoder(cfg: AudioMixConfig) {
         try {
+            prefsRepo.saveAudioConfig(cfg)
             ScreenCaptureEncoder.getInstance(context).updateAudioConfig(cfg)
         } catch (e: Exception) {
             Log.w(TAG, "Sync with encoder error: ${e.message}")

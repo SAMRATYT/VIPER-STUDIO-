@@ -79,6 +79,7 @@ fun SceneEditorScreen(
     viewModel: ViperStudioViewModel,
     modifier: Modifier = Modifier
 ) {
+    val streamConfig by viewModel.streamConfig.collectAsState()
     val scenes by viewModel.scenes.collectAsState()
     val activeScene by viewModel.activeScene.collectAsState()
     val selectedLayerId by viewModel.selectedLayerId.collectAsState()
@@ -158,22 +159,39 @@ fun SceneEditorScreen(
                     verticalAlignment = Alignment.CenterVertically
                 ) {
                     Text(
-                        text = "DRAG & POSITION CANVAS (16:9)",
+                        text = if (streamConfig.isLandscape) "DRAG & POSITION CANVAS (16:9 LANDSCAPE)" else "DRAG & POSITION CANVAS (9:16 PORTRAIT)",
                         fontSize = 10.sp,
                         fontWeight = FontWeight.Bold,
-                        color = ViperGreen
+                        color = if (streamConfig.isLandscape) ViperGreen else ViperCyan
                     )
-                    Text(
-                        text = "Touch layer to select & drag",
-                        fontSize = 10.sp,
-                        color = TextMuted
-                    )
+                    Box(
+                        modifier = Modifier
+                            .clip(RoundedCornerShape(6.dp))
+                            .background(Color(0xFF131A28))
+                            .border(1.dp, Color(0xFF263348), RoundedCornerShape(6.dp))
+                            .clickable { viewModel.toggleOrientation() }
+                            .padding(horizontal = 8.dp, vertical = 4.dp)
+                    ) {
+                        Text(
+                            text = if (streamConfig.isLandscape) "Rotate to 9:16" else "Rotate to 16:9",
+                            fontSize = 10.sp,
+                            color = ViperCyan,
+                            fontWeight = FontWeight.SemiBold
+                        )
+                    }
                 }
 
                 BoxWithConstraints(
-                    modifier = Modifier
-                        .fillMaxWidth()
-                        .aspectRatio(16f / 9f)
+                    modifier = (if (streamConfig.isLandscape) {
+                        Modifier
+                            .fillMaxWidth()
+                            .aspectRatio(16f / 9f)
+                    } else {
+                        Modifier
+                            .fillMaxWidth(0.65f)
+                            .aspectRatio(9f / 16f)
+                            .align(Alignment.CenterHorizontally)
+                    })
                         .clip(RoundedCornerShape(10.dp))
                         .border(1.dp, Color(0xFF263349), RoundedCornerShape(10.dp))
                         .background(Color(0xFF070B12))

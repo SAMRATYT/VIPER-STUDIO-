@@ -184,7 +184,7 @@ class ScreenRecorderManager(
         }
     }
 
-    fun startRecording(resolution: ResolutionOption) {
+    fun startRecording(resolution: ResolutionOption, isLandscape: Boolean = true) {
         if (_isRecording.value) return
         currentResolution = resolution
         updateAvailableStorage()
@@ -227,8 +227,8 @@ class ScreenRecorderManager(
 
                 val targetFps = 30
                 val targetBitrate = (resolution.recommendedBitrate).coerceAtLeast(3500)
-                encoder.startCapture(projection, resolution, targetFps, targetBitrate)
-                Log.i(TAG, "Hardware ScreenCaptureEncoder attached to MediaMuxer.")
+                encoder.startCapture(projection, resolution, targetFps, targetBitrate, isLandscape)
+                Log.i(TAG, "Hardware ScreenCaptureEncoder attached to MediaMuxer (Orientation: ${if (isLandscape) "Landscape" else "Portrait"}).")
             } catch (e: Exception) {
                 Log.e(TAG, "Failed initializing hardware MediaMuxer recording pipeline: ${e.message}", e)
                 cleanupMuxer()

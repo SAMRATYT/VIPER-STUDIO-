@@ -75,6 +75,7 @@ import com.example.ui.theme.LiveRed
 import com.example.ui.theme.TextMuted
 import com.example.ui.theme.TextPrimary
 import com.example.ui.theme.TextSecondary
+import com.example.ui.theme.ViperCyan
 import com.example.ui.theme.ViperGreen
 import com.example.ui.theme.ViperSurfaceCard
 
@@ -142,11 +143,18 @@ fun LiveScreen(
         // Telemetry Monitor
         TelemetryBadgeBar(stats = streamStats)
 
-        // Live Viewfinder Canvas
+        // Live Viewfinder Canvas (Adapts to Landscape 16:9 or Portrait 9:16)
         Box(
-            modifier = Modifier
-                .fillMaxWidth()
-                .aspectRatio(16f / 9f)
+            modifier = (if (streamConfig.isLandscape) {
+                Modifier
+                    .fillMaxWidth()
+                    .aspectRatio(16f / 9f)
+            } else {
+                Modifier
+                    .fillMaxWidth(0.68f)
+                    .aspectRatio(9f / 16f)
+                    .align(Alignment.CenterHorizontally)
+            })
                 .clip(RoundedCornerShape(14.dp))
                 .border(2.dp, if (streamStats.isStreaming) LiveRed else Color(0xFF202A3D), RoundedCornerShape(14.dp))
                 .background(Color(0xFF0D1420))
@@ -162,14 +170,15 @@ fun LiveScreen(
                 Text(
                     text = streamConfig.gameCategory.uppercase(),
                     fontWeight = FontWeight.Black,
-                    fontSize = 18.sp,
+                    fontSize = if (streamConfig.isLandscape) 18.sp else 14.sp,
                     color = Color(0xFF334155),
                     letterSpacing = 2.sp
                 )
                 Text(
-                    text = if (streamConfig.isLandscape) "LANDSCAPE 16:9 • ${streamConfig.resolution.label}" else "PORTRAIT • ${streamConfig.resolution.label}",
+                    text = if (streamConfig.isLandscape) "LANDSCAPE 16:9 • ${streamConfig.resolution.label}" else "PORTRAIT 9:16 • 720×1280",
                     fontSize = 11.sp,
-                    color = Color(0xFF475569)
+                    color = if (streamConfig.isLandscape) Color(0xFF475569) else ViperCyan,
+                    fontWeight = FontWeight.SemiBold
                 )
             }
 
@@ -183,7 +192,7 @@ fun LiveScreen(
                     modifier = Modifier
                         .align(Alignment.TopEnd)
                         .padding(10.dp)
-                        .size(width = 110.dp, height = 75.dp)
+                        .size(width = if (streamConfig.isLandscape) 110.dp else 80.dp, height = if (streamConfig.isLandscape) 75.dp else 60.dp)
                 )
             }
 
@@ -203,7 +212,7 @@ fun LiveScreen(
                     modifier = Modifier
                         .align(Alignment.BottomStart)
                         .padding(8.dp)
-                        .fillMaxWidth(0.55f)
+                        .fillMaxWidth(if (streamConfig.isLandscape) 0.55f else 0.85f)
                 )
             }
 
@@ -253,6 +262,64 @@ fun LiveScreen(
                         contentDescription = "Rotate",
                         tint = Color.White,
                         modifier = Modifier.size(16.dp)
+                    )
+                }
+            }
+        }
+
+        // Stream Orientation Selector (Landscape 16:9 vs Portrait 9:16)
+        Row(
+            modifier = Modifier.fillMaxWidth(),
+            horizontalArrangement = Arrangement.spacedBy(8.dp)
+        ) {
+            Box(
+                modifier = Modifier
+                    .weight(1f)
+                    .clip(RoundedCornerShape(10.dp))
+                    .background(if (streamConfig.isLandscape) ViperGreen else Color(0xFF131A28))
+                    .border(1.dp, if (streamConfig.isLandscape) ViperGreen else Color(0xFF263348), RoundedCornerShape(10.dp))
+                    .clickable { viewModel.setOrientation(true) }
+                    .padding(vertical = 10.dp),
+                contentAlignment = Alignment.Center
+            ) {
+                Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+                    Icon(
+                        Icons.Default.ScreenRotation,
+                        contentDescription = null,
+                        tint = if (streamConfig.isLandscape) Color.Black else ViperGreen,
+                        modifier = Modifier.size(14.dp)
+                    )
+                    Text(
+                        text = "LANDSCAPE 16:9",
+                        fontSize = 11.sp,
+                        fontWeight = FontWeight.Bold,
+                        color = if (streamConfig.isLandscape) Color.Black else TextPrimary
+                    )
+                }
+            }
+
+            Box(
+                modifier = Modifier
+                    .weight(1f)
+                    .clip(RoundedCornerShape(10.dp))
+                    .background(if (!streamConfig.isLandscape) ViperGreen else Color(0xFF131A28))
+                    .border(1.dp, if (!streamConfig.isLandscape) ViperGreen else Color(0xFF263348), RoundedCornerShape(10.dp))
+                    .clickable { viewModel.setOrientation(false) }
+                    .padding(vertical = 10.dp),
+                contentAlignment = Alignment.Center
+            ) {
+                Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+                    Icon(
+                        Icons.Default.ScreenRotation,
+                        contentDescription = null,
+                        tint = if (!streamConfig.isLandscape) Color.Black else ViperCyan,
+                        modifier = Modifier.size(14.dp)
+                    )
+                    Text(
+                        text = "PORTRAIT 9:16",
+                        fontSize = 11.sp,
+                        fontWeight = FontWeight.Bold,
+                        color = if (!streamConfig.isLandscape) Color.Black else TextPrimary
                     )
                 }
             }

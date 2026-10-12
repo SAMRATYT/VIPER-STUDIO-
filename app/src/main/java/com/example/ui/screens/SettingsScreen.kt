@@ -106,6 +106,33 @@ fun SettingsScreen(
                     )
                 }
 
+                // Stream Orientation (Landscape 16:9 vs Vertical 9:16)
+                Column(verticalArrangement = Arrangement.spacedBy(4.dp)) {
+                    Text("Stream & Recording Orientation", fontSize = 11.sp, color = TextSecondary)
+                    Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                        SettingPill(
+                            label = "Landscape (16:9 • 1280×720)",
+                            isSelected = streamConfig.isLandscape,
+                            onClick = { viewModel.setOrientation(true) },
+                            modifier = Modifier.weight(1f)
+                        )
+                        SettingPill(
+                            label = "Portrait (9:16 • 720×1280)",
+                            isSelected = !streamConfig.isLandscape,
+                            onClick = { viewModel.setOrientation(false) },
+                            modifier = Modifier.weight(1f)
+                        )
+                    }
+                    Text(
+                        text = if (streamConfig.isLandscape)
+                            "Standard 16:9 widescreen layout for YouTube Live and gaming streams."
+                        else
+                            "Vertical 9:16 layout for YouTube Shorts Live (720×1280 30/60FPS).",
+                        fontSize = 10.sp,
+                        color = ViperCyan
+                    )
+                }
+
                 // Resolution
                 Column(verticalArrangement = Arrangement.spacedBy(4.dp)) {
                     Text("Target Resolution", fontSize = 11.sp, color = TextSecondary)
@@ -259,16 +286,39 @@ fun SettingsScreen(
                     )
                 }
 
-                // Audio Enhancement Switches
+                // Background Noise Reduction ON/OFF Toggle
                 Row(
                     modifier = Modifier.fillMaxWidth(),
                     horizontalArrangement = Arrangement.SpaceBetween,
                     verticalAlignment = Alignment.CenterVertically
                 ) {
-                    Column {
-                        Text("Hardware Noise Suppression", fontSize = 12.sp, color = TextPrimary, fontWeight = FontWeight.SemiBold)
-                        Text("Eliminates background fan and room hiss", fontSize = 10.sp, color = TextMuted)
+                    Column(modifier = Modifier.weight(1f)) {
+                        Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+                            Text("Background Noise Reduction", fontSize = 12.sp, color = TextPrimary, fontWeight = FontWeight.SemiBold)
+                            Box(
+                                modifier = Modifier
+                                    .clip(RoundedCornerShape(4.dp))
+                                    .background(if (audioConfig.isNoiseSuppressionEnabled) ViperGreen.copy(alpha = 0.2f) else Color.Gray.copy(alpha = 0.2f))
+                                    .padding(horizontal = 6.dp, vertical = 2.dp)
+                            ) {
+                                Text(
+                                    text = if (audioConfig.isNoiseSuppressionEnabled) "ON" else "OFF",
+                                    fontSize = 9.sp,
+                                    fontWeight = FontWeight.Bold,
+                                    color = if (audioConfig.isNoiseSuppressionEnabled) ViperGreen else TextMuted
+                                )
+                            }
+                        }
+                        Text(
+                            text = if (audioConfig.isNoiseSuppressionEnabled)
+                                "ON: Active hardware NoiseSuppressor on microphone only (internal game audio is untouched)"
+                            else
+                                "OFF: Raw unprocessed microphone audio with natural tone and zero audio filtering",
+                            fontSize = 10.sp,
+                            color = TextMuted
+                        )
                     }
+                    Spacer(modifier = Modifier.width(8.dp))
                     Switch(
                         checked = audioConfig.isNoiseSuppressionEnabled,
                         onCheckedChange = { viewModel.toggleNoiseSuppression() },

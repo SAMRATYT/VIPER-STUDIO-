@@ -12,12 +12,14 @@ import com.example.engine.streaming.RtmpStreamEngine
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
+import com.example.data.local.AppPreferencesRepository
 import org.json.JSONArray
 import org.json.JSONObject
 
 class ViperStudioApplication : Application() {
 
     val database by lazy { ViperStudioDatabase.getDatabase(this) }
+    val preferencesRepository by lazy { AppPreferencesRepository(this) }
     val audioMixerEngine by lazy { AudioMixerEngine(this) }
     val rtmpStreamEngine by lazy { RtmpStreamEngine(this) }
     val localMirrorServer by lazy { LocalMirrorServer(this) }
@@ -151,6 +153,56 @@ class ViperStudioApplication : Application() {
                     )
                 )
 
+                // Preset 4: Vertical Mobile Live (9:16 YouTube Shorts / Reels)
+                val scene4Layers = listOf(
+                    SceneLayer(
+                        id = "layer_vert_game",
+                        type = LayerType.GAME_SCREEN,
+                        label = "Mobile Game Screen",
+                        xPct = 0f,
+                        yPct = 15f,
+                        widthPct = 100f,
+                        heightPct = 60f,
+                        zIndex = 0
+                    ),
+                    SceneLayer(
+                        id = "layer_vert_facecam",
+                        type = LayerType.CAMERA_PIP,
+                        label = "Facecam Top PiP",
+                        xPct = 25f,
+                        yPct = 2f,
+                        widthPct = 50f,
+                        heightPct = 12f,
+                        zIndex = 10,
+                        pipShape = "ROUNDED",
+                        bgColorHex = "#FF00E676"
+                    ),
+                    SceneLayer(
+                        id = "layer_vert_alert",
+                        type = LayerType.ALERT_BOX,
+                        label = "Alert Box",
+                        xPct = 10f,
+                        yPct = 76f,
+                        widthPct = 80f,
+                        heightPct = 10f,
+                        zIndex = 15
+                    ),
+                    SceneLayer(
+                        id = "layer_vert_ticker",
+                        type = LayerType.TEXT_BANNER,
+                        label = "Shorts Ticker",
+                        xPct = 0f,
+                        yPct = 90f,
+                        widthPct = 100f,
+                        heightPct = 8f,
+                        zIndex = 20,
+                        textContent = "⚡ VIPER STUDIO VERTICAL LIVE • SUBSCRIBE FOR MORE PRO CLUTCHES!",
+                        textColorHex = "#00E676",
+                        bgColorHex = "#D90A0E17",
+                        isMarqueeScroll = true
+                    )
+                )
+
                 database.sceneDao().insertScene(
                     SceneEntity("scene_pro_gaming", "BGMI Pro Gameplay + Facecam", true, serializeLayers(scene1Layers))
                 )
@@ -159,6 +211,9 @@ class ViperStudioApplication : Application() {
                 )
                 database.sceneDao().insertScene(
                     SceneEntity("scene_brb", "Be Right Back (BRB)", false, serializeLayers(scene3Layers))
+                )
+                database.sceneDao().insertScene(
+                    SceneEntity("scene_vertical_shorts", "Vertical Gaming (9:16 Shorts)", false, serializeLayers(scene4Layers))
                 )
             }
         }

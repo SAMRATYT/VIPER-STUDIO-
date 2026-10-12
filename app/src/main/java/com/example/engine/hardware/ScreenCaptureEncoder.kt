@@ -15,6 +15,8 @@ import android.media.MediaCodecList
 import android.media.MediaFormat
 import android.media.MediaRecorder
 import android.media.projection.MediaProjection
+import android.media.audiofx.AcousticEchoCanceler
+import android.media.audiofx.NoiseSuppressor
 import android.os.Build
 import android.os.Handler
 import android.os.HandlerThread
@@ -132,6 +134,12 @@ class ScreenCaptureEncoder(private val context: Context) : AudioRouteChangeListe
     @Volatile var isMicMuted: Boolean = false
     @Volatile var audioDelayMs: Int = 0
     @Volatile var captureMode: AudioCaptureMode = AudioCaptureMode.INTERNAL_AND_MIC
+    @Volatile var isNoiseSuppressionEnabled: Boolean = true
+    @Volatile var isEchoCancellationEnabled: Boolean = true
+
+    // Hardware Audio Effects (Applied to microphone only, keeping internal game audio untouched)
+    private var micNoiseSuppressor: NoiseSuppressor? = null
+    private var micEchoCanceler: AcousticEchoCanceler? = null
 
     // Monotonic Time Base (Synced between Video and Audio)
     private val presentationTimeBaseUs = AtomicLong(0)
@@ -151,7 +159,64 @@ class ScreenCaptureEncoder(private val context: Context) : AudioRouteChangeListe
         isMicMuted = config.isMicMuted
         audioDelayMs = config.audioDelayMs
         captureMode = config.audioCaptureMode
-        Log.d(TAG_AUDIO, "Audio config updated: mode=${captureMode.name}, micVol=$micVolume, gameVol=$gameVolume, muted=$isMicMuted, delay=${audioDelayMs}ms")
+        isNoiseSuppressionEnabled = config.isNoiseSuppressionEnabled
+        isEchoCancellationEnabled = config.isEchoCancellationEnabled
+
+        applyMicHardwareEffects(config.isNoiseSuppressionEnabled, config.isEchoCancellationEnabled)
+        Log.d(TAG_AUDIO, "Audio config updated: mode=${captureMode.name}, micVol=$micVolume, gameVol=$gameVolume, muted=$isMicMuted, delay=${audioDelayMs}ms, noiseReduction=${config.isNoiseSuppressionEnabled}")
+    }
+
+    private fun applyMicHardwareEffects(enableNoiseReduction: Boolean, enableEchoCancellation: Boolean) {
+        val record = audioRecordMic ?: return
+        val session = record.audioSessionId
+        if (session <= 0) return
+
+        try {
+            if (NoiseSuppressor.isAvailable()) {
+                if (enableNoiseReduction) {
+                    if (micNoiseSuppressor == null) {
+                        micNoiseSuppressor = NoiseSuppressor.create(session)
+                    }
+                    micNoiseSuppressor?.enabled = true
+                    Log.i(TAG_AUDIO, "Hardware NoiseSuppressor enabled on mic session $session (game audio unaffected)")
+                } else {
+                    micNoiseSuppressor?.enabled = false
+                    micNoiseSuppressor?.release()
+                    micNoiseSuppressor = null
+                    Log.i(TAG_AUDIO, "Hardware NoiseSuppressor disabled - natural raw microphone audio preserved")
+                }
+            } else {
+                Log.d(TAG_AUDIO, "Hardware NoiseSuppressor not available on this device chipset")
+            }
+
+            if (AcousticEchoCanceler.isAvailable()) {
+                if (enableEchoCancellation) {
+                    if (micEchoCanceler == null) {
+                        micEchoCanceler = AcousticEchoCanceler.create(session)
+                    }
+                    micEchoCanceler?.enabled = true
+                } else {
+                    micEchoCanceler?.enabled = false
+                    micEchoCanceler?.release()
+                    micEchoCanceler = null
+                }
+            }
+        } catch (e: Exception) {
+            Log.w(TAG_AUDIO, "Exception managing mic hardware audio effects", e)
+        }
+    }
+
+    private fun releaseMicHardwareEffects() {
+        try {
+            micNoiseSuppressor?.enabled = false
+            micNoiseSuppressor?.release()
+            micNoiseSuppressor = null
+            micEchoCanceler?.enabled = false
+            micEchoCanceler?.release()
+            micEchoCanceler = null
+        } catch (e: Exception) {
+            Log.w(TAG_AUDIO, "Error releasing mic audio effects", e)
+        }
     }
 
     override fun onAudioRouteChanged(description: String) {
@@ -207,7 +272,8 @@ class ScreenCaptureEncoder(private val context: Context) : AudioRouteChangeListe
         projection: MediaProjection,
         resolution: ResolutionOption,
         targetFps: Int,
-        bitrateKbps: Int
+        bitrateKbps: Int,
+        isLandscape: Boolean = true
     ): Boolean {
         if (isRunning.get()) {
             Log.i(TAG_VIDEO, "ScreenCaptureEncoder is already active. Attaching new listener without re-creating VirtualDisplay.")
@@ -226,12 +292,12 @@ class ScreenCaptureEncoder(private val context: Context) : AudioRouteChangeListe
 
         routingManager.startListening(this)
 
-        val successVideo = initVideoEncoder(projection, resolution, targetFps, bitrateKbps)
+        val successVideo = initVideoEncoder(projection, resolution, targetFps, bitrateKbps, isLandscape)
         val successAudio = initAudioEncoder(projection)
 
         Log.i(
             TAG_VIDEO,
-            "ScreenCaptureEncoder pipeline started. Video: $successVideo, Audio: $successAudio (${resolution.label}, $targetFps fps, $bitrateKbps kbps)"
+            "ScreenCaptureEncoder pipeline started. Video: $successVideo, Audio: $successAudio (Orientation: ${if (isLandscape) "Landscape 16:9" else "Portrait 9:16"}, ${resolution.label}, $targetFps fps, $bitrateKbps kbps)"
         )
         return successVideo
     }
@@ -241,23 +307,32 @@ class ScreenCaptureEncoder(private val context: Context) : AudioRouteChangeListe
         projection: MediaProjection,
         resolution: ResolutionOption,
         targetFps: Int,
-        bitrateKbps: Int
+        bitrateKbps: Int,
+        isLandscape: Boolean
     ): Boolean {
         return try {
             val mimeType = MediaFormat.MIMETYPE_VIDEO_AVC
 
+            // Support vertical (portrait: 720x1280) and horizontal (landscape: 1280x720)
+            val rawWidth = if (isLandscape) resolution.width else resolution.height
+            val rawHeight = if (isLandscape) resolution.height else resolution.width
+
             // 16-pixel alignment for Motorola Snapdragon hardware encoder compatibility
-            val alignedWidth = ((resolution.width + 15) / 16) * 16
-            val alignedHeight = ((resolution.height + 15) / 16) * 16
+            val alignedWidth = ((rawWidth + 15) / 16) * 16
+            val alignedHeight = ((rawHeight + 15) / 16) * 16
 
             val format = MediaFormat.createVideoFormat(mimeType, alignedWidth, alignedHeight).apply {
                 setInteger(MediaFormat.KEY_COLOR_FORMAT, MediaCodecInfo.CodecCapabilities.COLOR_FormatSurface)
                 setInteger(MediaFormat.KEY_BIT_RATE, (bitrateKbps * 1000).coerceIn(1000000, 15000000))
-                setInteger(MediaFormat.KEY_FRAME_RATE, targetFps.coerceIn(24, 60))
+                val fpsVal = targetFps.coerceIn(24, 60)
+                setInteger(MediaFormat.KEY_FRAME_RATE, fpsVal)
+                setInteger(MediaFormat.KEY_CAPTURE_RATE, fpsVal)
+                setFloat(MediaFormat.KEY_OPERATING_RATE, fpsVal.toFloat())
+                setInteger(MediaFormat.KEY_PRIORITY, 0)
                 setInteger(MediaFormat.KEY_I_FRAME_INTERVAL, 2) // 2-second keyframe interval required by YouTube
                 setInteger(MediaFormat.KEY_BITRATE_MODE, MediaCodecInfo.EncoderCapabilities.BITRATE_MODE_CBR)
 
-                val repeatUs = (1_000_000L / targetFps).coerceAtLeast(16_666L)
+                val repeatUs = (1_000_000L / fpsVal).coerceAtLeast(16_666L)
                 setLong(MediaFormat.KEY_REPEAT_PREVIOUS_FRAME_AFTER, repeatUs)
 
                 if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M) {
@@ -267,7 +342,7 @@ class ScreenCaptureEncoder(private val context: Context) : AudioRouteChangeListe
             }
 
             val codec = selectHardwareEncoder(mimeType) ?: MediaCodec.createEncoderByType(mimeType)
-            Log.i(TAG_VIDEO, "MediaCodec instantiated: ${codec.name} for ${alignedWidth}x${alignedHeight} @ $targetFps fps")
+            Log.i(TAG_VIDEO, "MediaCodec instantiated: ${codec.name} for ${alignedWidth}x${alignedHeight} (${if (isLandscape) "Landscape" else "Portrait"}) @ $targetFps fps")
 
             codec.configure(format, null, null, MediaCodec.CONFIGURE_FLAG_ENCODE)
             val inputSurface = codec.createInputSurface()
@@ -513,7 +588,7 @@ class ScreenCaptureEncoder(private val context: Context) : AudioRouteChangeListe
     }
 
     private fun createMicAudioRecord(bufferSize: Int): AudioRecord? {
-        return try {
+        val record = try {
             // Try Stereo first
             val stereoRecord = AudioRecord(
                 MediaRecorder.AudioSource.MIC,
@@ -543,6 +618,11 @@ class ScreenCaptureEncoder(private val context: Context) : AudioRouteChangeListe
             Log.w(TAG_AUDIO, "Error creating AudioRecord: ${e.message}")
             null
         }
+
+        record?.let {
+            applyMicHardwareEffects(isNoiseSuppressionEnabled, isEchoCancellationEnabled)
+        }
+        return record
     }
 
     /**
@@ -831,6 +911,7 @@ class ScreenCaptureEncoder(private val context: Context) : AudioRouteChangeListe
         videoCodec = null
 
         // 3. Stop and release audio AudioRecords and MediaCodec
+        releaseMicHardwareEffects()
         try {
             audioRecordMic?.stop()
             audioRecordMic?.release()
