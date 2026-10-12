@@ -1,6 +1,8 @@
 package com.example.engine.streaming
 
 import android.content.Context
+import android.media.MediaCodec
+import android.media.MediaFormat
 import android.net.ConnectivityManager
 import android.net.NetworkCapabilities
 import android.util.Log
@@ -9,6 +11,10 @@ import com.example.data.model.PlatformType
 import com.example.data.model.ResolutionOption
 import com.example.data.model.StreamConfig
 import com.example.data.model.StreamStats
+import com.example.engine.hardware.AudioFrameListener
+import com.example.engine.hardware.ScreenCaptureEncoder
+import com.example.engine.hardware.VideoFrameListener
+import com.example.service.StreamForegroundService
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
@@ -22,6 +28,7 @@ import java.io.InputStream
 import java.io.OutputStream
 import java.net.InetSocketAddress
 import java.net.Socket
+import java.nio.ByteBuffer
 import java.util.concurrent.atomic.AtomicBoolean
 import java.util.concurrent.atomic.AtomicLong
 import javax.net.ssl.SSLSocketFactory
@@ -30,7 +37,7 @@ import kotlin.random.Random
 class RtmpStreamEngine(private val context: Context) {
 
     companion object {
-        private const val TAG = "RtmpStreamEngine"
+        private const val TAG = "ViperRtmpEngine"
     }
 
     private val scope = CoroutineScope(Dispatchers.IO)
@@ -52,6 +59,122 @@ class RtmpStreamEngine(private val context: Context) {
     private val totalBytesSent = AtomicLong(0)
     private var reconnectAttempts = 0
     private val maxReconnectAttempts = 5
+
+    // Stream ID from createStream response
+    private var activeStreamId: Int = 1
+
+    private val videoFrameListener = object : VideoFrameListener {
+        override fun onVideoFormatAvailable(format: MediaFormat, sps: ByteArray, pps: ByteArray) {
+            val out = outputStream ?: return
+            if (sps.isNotEmpty() && pps.isNotEmpty()) {
+                val avcSeqHeader = createAvcSequenceHeaderWithSpsPps(sps, pps)
+                try {
+                    synchronized(out) {
+                        RtmpProtocol.writeChunk(
+                            out,
+                            RtmpProtocol.CSID_VIDEO,
+                            0,
+                            RtmpProtocol.MSG_VIDEO,
+                            activeStreamId,
+                            avcSeqHeader
+                        )
+                    }
+                    totalBytesSent.addAndGet(avcSeqHeader.size.toLong())
+                    Log.i(TAG, "Sent real hardware AVC Sequence Header (${avcSeqHeader.size} bytes) to YouTube RTMP.")
+                } catch (e: Exception) {
+                    Log.w(TAG, "Failed sending AVC sequence header: ${e.message}")
+                }
+            }
+        }
+
+        override fun onVideoSampleAvailable(
+            byteBuffer: ByteBuffer,
+            bufferInfo: MediaCodec.BufferInfo,
+            isKeyFrame: Boolean,
+            sps: ByteArray,
+            pps: ByteArray
+        ) {
+            val out = outputStream ?: return
+            if (!_stats.value.isStreaming) return
+
+            val currentTs = (System.currentTimeMillis() - startTimeMs).toInt().coerceAtLeast(0)
+            frameCounter++
+
+            val flvPacket = packageRealH264Nalu(byteBuffer, bufferInfo, isKeyFrame, sps, pps)
+            try {
+                synchronized(out) {
+                    RtmpProtocol.writeChunk(
+                        out,
+                        RtmpProtocol.CSID_VIDEO,
+                        currentTs,
+                        RtmpProtocol.MSG_VIDEO,
+                        activeStreamId,
+                        flvPacket
+                    )
+                }
+                totalBytesSent.addAndGet(flvPacket.size.toLong())
+            } catch (e: Exception) {
+                Log.w(TAG, "Video sample RTMP transmission exception: ${e.message}")
+            }
+        }
+    }
+
+    private val audioFrameListener = object : AudioFrameListener {
+        override fun onAudioFormatAvailable(format: MediaFormat, audioSpecificConfig: ByteArray) {
+            val out = outputStream ?: return
+            val aacSeqHeader = byteArrayOf(0xAF.toByte(), 0x00.toByte(), audioSpecificConfig[0], audioSpecificConfig[1])
+            try {
+                synchronized(out) {
+                    RtmpProtocol.writeChunk(
+                        out,
+                        RtmpProtocol.CSID_AUDIO,
+                        0,
+                        RtmpProtocol.MSG_AUDIO,
+                        activeStreamId,
+                        aacSeqHeader
+                    )
+                }
+                totalBytesSent.addAndGet(aacSeqHeader.size.toLong())
+                Log.i(TAG, "Sent real hardware AAC Audio Sequence Header (${aacSeqHeader.size} bytes) to YouTube RTMP.")
+            } catch (e: Exception) {
+                Log.w(TAG, "Failed sending AAC sequence header: ${e.message}")
+            }
+        }
+
+        override fun onAudioSampleAvailable(byteBuffer: ByteBuffer, bufferInfo: MediaCodec.BufferInfo) {
+            val out = outputStream ?: return
+            if (!_stats.value.isStreaming) return
+
+            val currentTs = (System.currentTimeMillis() - startTimeMs).toInt().coerceAtLeast(0)
+            val aacSize = bufferInfo.size
+            if (aacSize <= 0) return
+
+            val packet = ByteArray(2 + aacSize)
+            packet[0] = 0xAF.toByte() // AAC 44.1kHz Stereo 16-bit
+            packet[1] = 0x01.toByte() // Raw AAC payload
+
+            val dup = byteBuffer.duplicate()
+            dup.position(bufferInfo.offset)
+            dup.limit(bufferInfo.offset + bufferInfo.size)
+            dup.get(packet, 2, aacSize)
+
+            try {
+                synchronized(out) {
+                    RtmpProtocol.writeChunk(
+                        out,
+                        RtmpProtocol.CSID_AUDIO,
+                        currentTs,
+                        RtmpProtocol.MSG_AUDIO,
+                        activeStreamId,
+                        packet
+                    )
+                }
+                totalBytesSent.addAndGet(packet.size.toLong())
+            } catch (e: Exception) {
+                Log.w(TAG, "Audio sample RTMP transmission exception: ${e.message}")
+            }
+        }
+    }
 
     fun startStream(config: StreamConfig): Boolean {
         // Prevent repeated Start Live button presses from creating duplicate streaming sessions
@@ -131,7 +254,6 @@ class RtmpStreamEngine(private val context: Context) {
                         val backoffDelay = (1500L * reconnectAttempts).coerceAtMost(6000L)
                         delay(backoffDelay)
                     } else {
-                        // Max retries reached or fatal error
                         if (isConnectingOrStreaming.get()) {
                             _stats.value = _stats.value.copy(
                                 isStreaming = false,
@@ -187,12 +309,13 @@ class RtmpStreamEngine(private val context: Context) {
         try {
             s.soTimeout = 7000
             s.connect(InetSocketAddress(host, port), 5000)
-            inputStream = s.getInputStream()
+            val inStream = s.getInputStream()
+            inputStream = inStream
             val out = s.getOutputStream()
             outputStream = out
 
             // 1. Handshake
-            RtmpProtocol.performHandshake(inputStream!!, out)
+            RtmpProtocol.performHandshake(inStream, out)
             Log.i(TAG, "RTMP Handshake completed successfully with $host:$port")
 
             // 2. Set Chunk Size (4096)
@@ -235,7 +358,6 @@ class RtmpStreamEngine(private val context: Context) {
                 payload = connectCmd
             )
 
-            // Reset protocol state
             RtmpProtocol.resetProtocolState()
 
             // Read connect response
@@ -243,7 +365,7 @@ class RtmpStreamEngine(private val context: Context) {
             var connectAccepted = false
 
             while (System.currentTimeMillis() < connectTimeoutDeadline) {
-                val msg = RtmpProtocol.readMessage(inputStream!!) ?: break
+                val msg = RtmpProtocol.readMessage(inStream) ?: break
                 if (msg.messageType == RtmpProtocol.MSG_COMMAND_AMF0) {
                     val reader = Amf0Reader(msg.payload)
                     val cmdName = reader.readNext() as? String
@@ -253,7 +375,7 @@ class RtmpStreamEngine(private val context: Context) {
                         connectAccepted = true
                         break
                     } else if (cmdName == "_error") {
-                        reader.readNext() // null
+                        reader.readNext()
                         val errObj = reader.readNext() as? Map<*, *>
                         val desc = (errObj?.get("description") ?: errObj?.get("code")) ?: "Server rejected connection"
                         throw java.io.IOException("RTMP connect rejected: $desc")
@@ -290,17 +412,16 @@ class RtmpStreamEngine(private val context: Context) {
                 .toByteArray()
             RtmpProtocol.writeChunk(out, RtmpProtocol.CSID_COMMAND, 0, RtmpProtocol.MSG_COMMAND_AMF0, 0, createStreamCmd)
 
-            // Read createStream response
             val createStreamDeadline = System.currentTimeMillis() + 8000
             var createStreamSuccess = false
             while (System.currentTimeMillis() < createStreamDeadline) {
-                val msg = RtmpProtocol.readMessage(inputStream!!) ?: break
+                val msg = RtmpProtocol.readMessage(inStream) ?: break
                 if (msg.messageType == RtmpProtocol.MSG_COMMAND_AMF0) {
                     val reader = Amf0Reader(msg.payload)
                     val cmdName = reader.readNext() as? String
                     val txId = reader.readNext() as? Double
                     if (cmdName == "_result" && txId == 4.0) {
-                        reader.readNext() // null
+                        reader.readNext()
                         val sid = reader.readNext() as? Double
                         if (sid != null) streamId = sid
                         Log.i(TAG, "RTMP createStream succeeded. streamId=$streamId")
@@ -316,6 +437,8 @@ class RtmpStreamEngine(private val context: Context) {
                 throw java.io.IOException("RTMP createStream timed out")
             }
 
+            activeStreamId = streamId.toInt()
+
             // 6. Publish
             val publishCmd = Amf0Writer()
                 .writeString("publish")
@@ -324,18 +447,18 @@ class RtmpStreamEngine(private val context: Context) {
                 .writeString(streamKey)
                 .writeString("live")
                 .toByteArray()
-            RtmpProtocol.writeChunk(out, RtmpProtocol.CSID_COMMAND, 0, RtmpProtocol.MSG_COMMAND_AMF0, streamId.toInt(), publishCmd)
+            RtmpProtocol.writeChunk(out, RtmpProtocol.CSID_COMMAND, 0, RtmpProtocol.MSG_COMMAND_AMF0, activeStreamId, publishCmd)
 
-            // Wait for onStatus (NetStream.Publish.Start) or error
+            // Wait for onStatus (NetStream.Publish.Start)
             val publishDeadline = System.currentTimeMillis() + 8000
             var publishConfirmed = false
             while (System.currentTimeMillis() < publishDeadline) {
-                val msg = RtmpProtocol.readMessage(inputStream!!) ?: break
+                val msg = RtmpProtocol.readMessage(inStream) ?: break
                 if (msg.messageType == RtmpProtocol.MSG_COMMAND_AMF0) {
                     val reader = Amf0Reader(msg.payload)
                     val cmdName = reader.readNext() as? String
-                    reader.readNext() // transaction ID
-                    reader.readNext() // command object (null)
+                    reader.readNext()
+                    reader.readNext()
                     val infoObj = reader.readNext() as? Map<*, *>
                     val code = infoObj?.get("code") as? String
                     val desc = infoObj?.get("description") as? String
@@ -359,7 +482,7 @@ class RtmpStreamEngine(private val context: Context) {
             }
 
             if (!publishConfirmed && host != "127.0.0.1" && host != "localhost") {
-                Log.w(TAG, "NetStream.Publish.Start not received explicitly, but no error encountered. Proceeding with video headers.")
+                Log.w(TAG, "NetStream.Publish.Start not received explicitly; proceeding with video transmission.")
             }
 
             // 7. Metadata (@setDataFrame / onMetaData)
@@ -376,22 +499,22 @@ class RtmpStreamEngine(private val context: Context) {
                 "audiosamplerate" to 44100.0,
                 "audiosamplesize" to 16.0,
                 "stereo" to true,
-                "encoder" to "VIPER STUDIO (Android)"
+                "encoder" to "VIPER STUDIO (Android 16 Qualcomm)"
             )
             val metaPacket = Amf0Writer()
                 .writeString("@setDataFrame")
                 .writeString("onMetaData")
                 .writeEcmaArray(metaData)
                 .toByteArray()
-            RtmpProtocol.writeChunk(out, RtmpProtocol.CSID_DATA, 0, RtmpProtocol.MSG_DATA_AMF0, streamId.toInt(), metaPacket)
+            RtmpProtocol.writeChunk(out, RtmpProtocol.CSID_DATA, 0, RtmpProtocol.MSG_DATA_AMF0, activeStreamId, metaPacket)
 
-            // 8. AVC Sequence Header (H.264 AVCDecoderConfigurationRecord: SPS + PPS)
+            // 8. AVC Sequence Header
             val avcSeqHeader = createAvcSequenceHeader(res)
-            RtmpProtocol.writeChunk(out, RtmpProtocol.CSID_VIDEO, 0, RtmpProtocol.MSG_VIDEO, streamId.toInt(), avcSeqHeader)
+            RtmpProtocol.writeChunk(out, RtmpProtocol.CSID_VIDEO, 0, RtmpProtocol.MSG_VIDEO, activeStreamId, avcSeqHeader)
 
             // 9. AAC Audio Sequence Header (AudioSpecificConfig: AAC-LC 44.1kHz Stereo)
             val aacSeqHeader = byteArrayOf(0xAF.toByte(), 0x00.toByte(), 0x12.toByte(), 0x10.toByte())
-            RtmpProtocol.writeChunk(out, RtmpProtocol.CSID_AUDIO, 0, RtmpProtocol.MSG_AUDIO, streamId.toInt(), aacSeqHeader)
+            RtmpProtocol.writeChunk(out, RtmpProtocol.CSID_AUDIO, 0, RtmpProtocol.MSG_AUDIO, activeStreamId, aacSeqHeader)
 
             isLiveVerified = true
             Log.i(TAG, "Stream successfully published to RTMP. Status: LIVE")
@@ -417,53 +540,71 @@ class RtmpStreamEngine(private val context: Context) {
         val targetFps = currentConfig.fps.value
         val frameIntervalMs = (1000L / targetFps).coerceAtLeast(16L)
         val keyframeIntervalFrames = targetFps * currentConfig.keyframeIntervalSec
+        val (fallbackSps, fallbackPps) = getSpsPpsForResolution(currentConfig.resolution)
 
-        val streamStartTimestamp = System.currentTimeMillis()
-        var streamIdInt = streamId.toInt()
+        // Attach real hardware screen encoder if MediaProjection is available
+        val projection = StreamForegroundService.currentMediaProjection
+        val encoder = ScreenCaptureEncoder.getInstance(context)
 
-        val (sps, pps) = getSpsPpsForResolution(currentConfig.resolution)
+        if (projection != null) {
+            Log.i(TAG, "Attaching ScreenCaptureEncoder for real hardware screen capture to RTMP.")
+            encoder.registerVideoListener(videoFrameListener)
+            encoder.registerAudioListener(audioFrameListener)
+            encoder.startCapture(projection, currentConfig.resolution, targetFps, currentConfig.bitrateKbps)
+        }
 
-        while (scope.isActive && isConnectingOrStreaming.get()) {
-            frameCounter++
-            val isKeyframe = (frameCounter % keyframeIntervalFrames == 1L)
-            val currentTs = (System.currentTimeMillis() - streamStartTimestamp).toInt()
+        try {
+            while (scope.isActive && isConnectingOrStreaming.get()) {
+                val out = outputStream ?: break
+                if (socket?.isConnected != true || socket?.isClosed == true) {
+                    throw java.io.IOException("RTMP stream socket disconnected.")
+                }
 
-            try {
-                val out = outputStream
-                if (out != null && socket?.isConnected == true && socket?.isClosed == false) {
-                    // Video Packet (Type 9)
-                    val videoPayload = createH264NaluPacket(isKeyframe, sps, pps, currentConfig.bitrateKbps, targetFps)
-                    RtmpProtocol.writeChunk(out, RtmpProtocol.CSID_VIDEO, currentTs, RtmpProtocol.MSG_VIDEO, streamIdInt, videoPayload)
+                // If MediaProjection is absent (e.g. testing or camera mode), feed synthetic packets to keep connection alive
+                if (projection == null) {
+                    frameCounter++
+                    val isKeyframe = (frameCounter % keyframeIntervalFrames == 1L)
+                    val currentTs = (System.currentTimeMillis() - startTimeMs).toInt().coerceAtLeast(0)
+
+                    val videoPayload = createH264NaluPacket(isKeyframe, fallbackSps, fallbackPps, currentConfig.bitrateKbps, targetFps)
+                    synchronized(out) {
+                        RtmpProtocol.writeChunk(out, RtmpProtocol.CSID_VIDEO, currentTs, RtmpProtocol.MSG_VIDEO, activeStreamId, videoPayload)
+                    }
                     totalBytesSent.addAndGet(videoPayload.size.toLong())
 
-                    // Audio Packet (Type 8, AAC)
                     val audioPayload = createAacAudioPacket()
-                    RtmpProtocol.writeChunk(out, RtmpProtocol.CSID_AUDIO, currentTs, RtmpProtocol.MSG_AUDIO, streamIdInt, audioPayload)
+                    synchronized(out) {
+                        RtmpProtocol.writeChunk(out, RtmpProtocol.CSID_AUDIO, currentTs, RtmpProtocol.MSG_AUDIO, activeStreamId, audioPayload)
+                    }
                     totalBytesSent.addAndGet(audioPayload.size.toLong())
                 }
-            } catch (e: Exception) {
-                Log.w(TAG, "Socket packet send failed: ${e.message}")
-                throw java.io.IOException("RTMP stream socket disconnected: ${e.message}")
+
+                delay(frameIntervalMs)
             }
-            delay(frameIntervalMs)
+        } finally {
+            encoder.unregisterVideoListener(videoFrameListener)
+            encoder.unregisterAudioListener(audioFrameListener)
         }
     }
 
     private fun createAvcSequenceHeader(res: ResolutionOption): ByteArray {
         val (sps, pps) = getSpsPpsForResolution(res)
+        return createAvcSequenceHeaderWithSpsPps(sps, pps)
+    }
+
+    private fun createAvcSequenceHeaderWithSpsPps(sps: ByteArray, pps: ByteArray): ByteArray {
         val header = ByteArray(16 + sps.size + pps.size)
         var idx = 0
         header[idx++] = 0x17.toByte() // Keyframe (1), AVC (7)
         header[idx++] = 0x00.toByte() // AVC Sequence Header
-        header[idx++] = 0x00.toByte() // Composition time
+        header[idx++] = 0x00.toByte()
         header[idx++] = 0x00.toByte()
         header[idx++] = 0x00.toByte()
 
-        // AVCDecoderConfigurationRecord
         header[idx++] = 0x01.toByte() // configurationVersion
-        header[idx++] = sps[1]        // AVCProfileIndication
-        header[idx++] = sps[2]        // profile_compatibility
-        header[idx++] = sps[3]        // AVCLevelIndication
+        header[idx++] = if (sps.size > 1) sps[1] else 0x42.toByte()
+        header[idx++] = if (sps.size > 2) sps[2] else 0xE0.toByte()
+        header[idx++] = if (sps.size > 3) sps[3] else 0x1F.toByte()
         header[idx++] = 0xFF.toByte() // lengthSizeMinusOne = 3 (4-byte NALU length)
         header[idx++] = 0xE1.toByte() // numOfSequenceParameterSets = 1
         header[idx++] = ((sps.size shr 8) and 0xFF).toByte()
@@ -479,8 +620,85 @@ class RtmpStreamEngine(private val context: Context) {
         return header
     }
 
+    private fun packageRealH264Nalu(
+        byteBuffer: ByteBuffer,
+        bufferInfo: MediaCodec.BufferInfo,
+        isKeyFrame: Boolean,
+        sps: ByteArray,
+        pps: ByteArray
+    ): ByteArray {
+        val dup = byteBuffer.duplicate()
+        dup.position(bufferInfo.offset)
+        dup.limit(bufferInfo.offset + bufferInfo.size)
+        val rawBytes = ByteArray(dup.remaining())
+        dup.get(rawBytes)
+
+        var naluOffset = 0
+        if (rawBytes.size >= 4 && rawBytes[0] == 0.toByte() && rawBytes[1] == 0.toByte() && rawBytes[2] == 0.toByte() && rawBytes[3] == 1.toByte()) {
+            naluOffset = 4
+        } else if (rawBytes.size >= 3 && rawBytes[0] == 0.toByte() && rawBytes[1] == 0.toByte() && rawBytes[2] == 1.toByte()) {
+            naluOffset = 3
+        }
+        val naluBodySize = (rawBytes.size - naluOffset).coerceAtLeast(0)
+
+        if (isKeyFrame && sps.isNotEmpty() && pps.isNotEmpty()) {
+            val totalSize = 5 + (4 + sps.size) + (4 + pps.size) + (4 + naluBodySize)
+            val packet = ByteArray(totalSize)
+            var idx = 0
+            packet[idx++] = 0x17.toByte() // Keyframe (1), AVC (7)
+            packet[idx++] = 0x01.toByte() // AVC NALU
+            packet[idx++] = 0x00.toByte()
+            packet[idx++] = 0x00.toByte()
+            packet[idx++] = 0x00.toByte()
+
+            // 1. SPS NALU
+            packet[idx++] = ((sps.size shr 24) and 0xFF).toByte()
+            packet[idx++] = ((sps.size shr 16) and 0xFF).toByte()
+            packet[idx++] = ((sps.size shr 8) and 0xFF).toByte()
+            packet[idx++] = (sps.size and 0xFF).toByte()
+            System.arraycopy(sps, 0, packet, idx, sps.size)
+            idx += sps.size
+
+            // 2. PPS NALU
+            packet[idx++] = ((pps.size shr 24) and 0xFF).toByte()
+            packet[idx++] = ((pps.size shr 16) and 0xFF).toByte()
+            packet[idx++] = ((pps.size shr 8) and 0xFF).toByte()
+            packet[idx++] = (pps.size and 0xFF).toByte()
+            System.arraycopy(pps, 0, packet, idx, pps.size)
+            idx += pps.size
+
+            // 3. IDR Slice NALU
+            packet[idx++] = ((naluBodySize shr 24) and 0xFF).toByte()
+            packet[idx++] = ((naluBodySize shr 16) and 0xFF).toByte()
+            packet[idx++] = ((naluBodySize shr 8) and 0xFF).toByte()
+            packet[idx++] = (naluBodySize and 0xFF).toByte()
+            if (naluBodySize > 0) {
+                System.arraycopy(rawBytes, naluOffset, packet, idx, naluBodySize)
+            }
+
+            return packet
+        } else {
+            val packet = ByteArray(5 + 4 + naluBodySize)
+            var idx = 0
+            packet[idx++] = if (isKeyFrame) 0x17.toByte() else 0x27.toByte()
+            packet[idx++] = 0x01.toByte() // AVC NALU
+            packet[idx++] = 0x00.toByte()
+            packet[idx++] = 0x00.toByte()
+            packet[idx++] = 0x00.toByte()
+
+            packet[idx++] = ((naluBodySize shr 24) and 0xFF).toByte()
+            packet[idx++] = ((naluBodySize shr 16) and 0xFF).toByte()
+            packet[idx++] = ((naluBodySize shr 8) and 0xFF).toByte()
+            packet[idx++] = (naluBodySize and 0xFF).toByte()
+            if (naluBodySize > 0) {
+                System.arraycopy(rawBytes, naluOffset, packet, idx, naluBodySize)
+            }
+
+            return packet
+        }
+    }
+
     private fun getSpsPpsForResolution(res: ResolutionOption): Pair<ByteArray, ByteArray> {
-        // Valid baseline profile 3.1 / 4.0 SPS and PPS byte streams
         val sps = when (res) {
             ResolutionOption.RES_1080P -> byteArrayOf(
                 0x67.toByte(), 0x42.toByte(), 0xE0.toByte(), 0x28.toByte(),
@@ -519,7 +737,6 @@ class RtmpStreamEngine(private val context: Context) {
         val payloadBodySize = ((bitrateKbps * 125) / fps).coerceIn(512, 16384)
 
         if (isKeyframe) {
-            // Include SPS NALU + PPS NALU + IDR slice NALU for maximum decoder compatibility on YouTube ingest
             val spsNaluLen = sps.size
             val ppsNaluLen = pps.size
             val idrNaluLen = payloadBodySize
@@ -528,14 +745,12 @@ class RtmpStreamEngine(private val context: Context) {
             val packet = ByteArray(totalSize)
             var idx = 0
 
-            // FLV Tag Header
-            packet[idx++] = 0x17.toByte() // Keyframe (1), AVC (7)
-            packet[idx++] = 0x01.toByte() // AVC NALU
-            packet[idx++] = 0x00.toByte() // Composition time offset 0
+            packet[idx++] = 0x17.toByte()
+            packet[idx++] = 0x01.toByte()
+            packet[idx++] = 0x00.toByte()
             packet[idx++] = 0x00.toByte()
             packet[idx++] = 0x00.toByte()
 
-            // 1. SPS NALU (4-byte length + SPS bytes)
             packet[idx++] = ((spsNaluLen shr 24) and 0xFF).toByte()
             packet[idx++] = ((spsNaluLen shr 16) and 0xFF).toByte()
             packet[idx++] = ((spsNaluLen shr 8) and 0xFF).toByte()
@@ -543,7 +758,6 @@ class RtmpStreamEngine(private val context: Context) {
             System.arraycopy(sps, 0, packet, idx, spsNaluLen)
             idx += spsNaluLen
 
-            // 2. PPS NALU (4-byte length + PPS bytes)
             packet[idx++] = ((ppsNaluLen shr 24) and 0xFF).toByte()
             packet[idx++] = ((ppsNaluLen shr 16) and 0xFF).toByte()
             packet[idx++] = ((ppsNaluLen shr 8) and 0xFF).toByte()
@@ -551,43 +765,38 @@ class RtmpStreamEngine(private val context: Context) {
             System.arraycopy(pps, 0, packet, idx, ppsNaluLen)
             idx += ppsNaluLen
 
-            // 3. IDR Slice NALU (4-byte length + NALU Header 0x65 + body)
             packet[idx++] = ((idrNaluLen shr 24) and 0xFF).toByte()
             packet[idx++] = ((idrNaluLen shr 16) and 0xFF).toByte()
             packet[idx++] = ((idrNaluLen shr 8) and 0xFF).toByte()
             packet[idx++] = (idrNaluLen and 0xFF).toByte()
-            packet[idx] = 0x65.toByte() // NAL_UNIT_TYPE_CODED_SLICE_IDR
+            packet[idx] = 0x65.toByte()
 
             return packet
         } else {
-            // Non-IDR P-frame NALU
             val naluLen = payloadBodySize
             val packet = ByteArray(5 + 4 + naluLen)
             var idx = 0
 
-            // FLV Tag Header
-            packet[idx++] = 0x27.toByte() // Inter frame (2), AVC (7)
-            packet[idx++] = 0x01.toByte() // AVC NALU
-            packet[idx++] = 0x00.toByte() // Composition time offset 0
+            packet[idx++] = 0x27.toByte()
+            packet[idx++] = 0x01.toByte()
+            packet[idx++] = 0x00.toByte()
             packet[idx++] = 0x00.toByte()
             packet[idx++] = 0x00.toByte()
 
-            // 4-byte NALU length
             packet[idx++] = ((naluLen shr 24) and 0xFF).toByte()
             packet[idx++] = ((naluLen shr 16) and 0xFF).toByte()
             packet[idx++] = ((naluLen shr 8) and 0xFF).toByte()
             packet[idx++] = (naluLen and 0xFF).toByte()
 
-            // Non-IDR Slice NALU header
-            packet[idx] = 0x41.toByte() // NAL_UNIT_TYPE_CODED_SLICE_NON_IDR
+            packet[idx] = 0x41.toByte()
             return packet
         }
     }
 
     private fun createAacAudioPacket(): ByteArray {
         val audioBytes = ByteArray(2 + 256)
-        audioBytes[0] = 0xAF.toByte() // AAC 44.1kHz 16-bit Stereo
-        audioBytes[1] = 0x01.toByte() // Raw AAC frame
+        audioBytes[0] = 0xAF.toByte()
+        audioBytes[1] = 0x01.toByte()
         return audioBytes
     }
 
@@ -609,7 +818,6 @@ class RtmpStreamEngine(private val context: Context) {
                 val deltaBytes = curBytes - lastBytes
                 lastBytes = curBytes
 
-                // Measured actual upload bitrate in Kbps
                 val measuredBitrate = if (deltaBytes > 0) {
                     ((deltaBytes * 8) / 1000).toInt()
                 } else {
@@ -682,6 +890,10 @@ class RtmpStreamEngine(private val context: Context) {
         telemetryJob?.cancel()
         telemetryJob = null
         cleanupSocket()
+
+        val encoder = ScreenCaptureEncoder.getInstance(context)
+        encoder.unregisterVideoListener(videoFrameListener)
+        encoder.unregisterAudioListener(audioFrameListener)
     }
 
     private fun cleanupSocket() {
