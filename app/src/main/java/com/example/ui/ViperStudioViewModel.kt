@@ -1,6 +1,7 @@
 package com.example.ui
 
 import android.app.Application
+import android.content.Context
 import androidx.camera.core.CameraSelector
 import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.viewModelScope
@@ -14,6 +15,7 @@ import com.example.data.model.AudioMixConfig
 import com.example.data.model.FpsOption
 import com.example.data.model.LayerType
 import com.example.data.model.PlatformType
+import com.example.data.model.RateControlMode
 import com.example.data.model.RecordingItem
 import com.example.data.model.ResolutionOption
 import com.example.data.model.SceneLayer
@@ -36,20 +38,16 @@ import kotlinx.coroutines.flow.stateIn
 import kotlinx.coroutines.launch
 import java.util.UUID
 
-data class ChatMessage(
-    val id: String = UUID.randomUUID().toString(),
-    val sender: String,
-    val text: String,
-    val badgeColorHex: String = "#00E676",
-    val isSuperChat: Boolean = false,
-    val amount: String = ""
-)
+import com.example.data.model.ChatMessage
+import com.example.data.model.LiveChatSettings
+import com.example.data.model.YouTubeChannelInfo
 
 class ViperStudioViewModel(application: Application) : AndroidViewModel(application) {
 
     private val app = application as ViperStudioApplication
     private val rtmpEngine = app.rtmpStreamEngine
     private val audioEngine = app.audioMixerEngine
+    private val ytEngine = app.youTubeSyncEngine
     private val mirrorServer = app.localMirrorServer
     private val recorderManager = app.screenRecorderManager
     private val db = app.database
@@ -126,19 +124,19 @@ class ViperStudioViewModel(application: Application) : AndroidViewModel(applicat
 
     private var alertDismissJob: Job? = null
 
-    // Live Chat Overlay
-    private val _chatMessages = MutableStateFlow<List<ChatMessage>>(
-        listOf(
-            ChatMessage(sender = "SniperKing99", text = "Let's go VIPER STUDIO! 🔥", badgeColorHex = "#00E5FF"),
-            ChatMessage(sender = "ApexPro_Gaming", text = "Clean 1080p 60fps stream! What device?", badgeColorHex = "#00E676"),
-            ChatMessage(sender = "CyberQueen", text = "Drop Pochinki next match!!", badgeColorHex = "#B388FF"),
-            ChatMessage(sender = "Rohan_BGMI", text = "Donated ₹100 for custom room!", badgeColorHex = "#FFD600", isSuperChat = true, amount = "₹100")
-        )
-    )
-    val chatMessages: StateFlow<List<ChatMessage>> = _chatMessages.asStateFlow()
+    // YouTube OAuth & Channel Synchronization
+    val youTubeChannelInfo: StateFlow<YouTubeChannelInfo> = ytEngine.channelInfo
+    val isYouTubeSyncing: StateFlow<Boolean> = ytEngine.isSyncing
+
+    // Live Chat Feed (Synchronized with YouTube Live Chat & Offline viewer simulation)
+    val chatMessages: StateFlow<List<ChatMessage>> = ytEngine.chatMessages
 
     private val _isChatOverlayVisible = MutableStateFlow(true)
     val isChatOverlayVisible: StateFlow<Boolean> = _isChatOverlayVisible.asStateFlow()
+
+    // Customizable Live Chat Overlay Settings (Draggable, Opacity, Font Size, Lock)
+    private val _liveChatSettings = MutableStateFlow(prefsRepo.loadLiveChatSettings())
+    val liveChatSettings: StateFlow<LiveChatSettings> = _liveChatSettings.asStateFlow()
 
     // PC Mirror Server
     val isMirrorServerRunning: StateFlow<Boolean> = mirrorServer.isRunning
@@ -226,6 +224,118 @@ class ViperStudioViewModel(application: Application) : AndroidViewModel(applicat
         val updatedScene = current.copy(layers = updatedLayers)
         _activeScene.value = updatedScene
         saveSceneToDb(updatedScene)
+    }
+
+    fun updateLayerRotation(layerId: String, rotationDeg: Float) {
+        val current = _activeScene.value ?: return
+        val updatedLayers = current.layers.map {
+            if (it.id == layerId) it.copy(rotationDeg = rotationDeg.coerceIn(-180f, 180f)) else it
+        }
+        val updatedScene = current.copy(layers = updatedLayers)
+        _activeScene.value = updatedScene
+        saveSceneToDb(updatedScene)
+    }
+
+    fun updateLayerOpacity(layerId: String, opacity: Float) {
+        val current = _activeScene.value ?: return
+        val updatedLayers = current.layers.map {
+            if (it.id == layerId) it.copy(opacity = opacity.coerceIn(0.05f, 1.0f)) else it
+        }
+        val updatedScene = current.copy(layers = updatedLayers)
+        _activeScene.value = updatedScene
+        saveSceneToDb(updatedScene)
+    }
+
+    fun updateLayerText(layerId: String, text: String, colorHex: String) {
+        val current = _activeScene.value ?: return
+        val updatedLayers = current.layers.map {
+            if (it.id == layerId) it.copy(textContent = text, textColorHex = colorHex) else it
+        }
+        val updatedScene = current.copy(layers = updatedLayers)
+        _activeScene.value = updatedScene
+        saveSceneToDb(updatedScene)
+    }
+
+    fun updateLayerImage(layerId: String, imageUrl: String) {
+        val current = _activeScene.value ?: return
+        val updatedLayers = current.layers.map {
+            if (it.id == layerId) it.copy(imageUrl = imageUrl) else it
+        }
+        val updatedScene = current.copy(layers = updatedLayers)
+        _activeScene.value = updatedScene
+        saveSceneToDb(updatedScene)
+    }
+
+    fun duplicateLayer(layerId: String) {
+        val current = _activeScene.value ?: return
+        val source = current.layers.firstOrNull { it.id == layerId } ?: return
+        val newLayer = source.copy(
+            id = "layer_${UUID.randomUUID().toString().take(6)}",
+            label = "${source.label} (Copy)",
+            xPct = (source.xPct + 4f).coerceAtMost(90f),
+            yPct = (source.yPct + 4f).coerceAtMost(90f),
+            zIndex = (current.layers.maxOfOrNull { it.zIndex } ?: 0) + 1
+        )
+        val updatedScene = current.copy(layers = current.layers + newLayer)
+        _activeScene.value = updatedScene
+        _selectedLayerId.value = newLayer.id
+        saveSceneToDb(updatedScene)
+    }
+
+    fun bringLayerToFront(layerId: String) {
+        val current = _activeScene.value ?: return
+        val maxZ = (current.layers.maxOfOrNull { it.zIndex } ?: 0) + 1
+        val updatedLayers = current.layers.map {
+            if (it.id == layerId) it.copy(zIndex = maxZ) else it
+        }
+        val updatedScene = current.copy(layers = updatedLayers)
+        _activeScene.value = updatedScene
+        saveSceneToDb(updatedScene)
+    }
+
+    fun sendLayerToBack(layerId: String) {
+        val current = _activeScene.value ?: return
+        val minZ = (current.layers.minOfOrNull { it.zIndex } ?: 0) - 1
+        val updatedLayers = current.layers.map {
+            if (it.id == layerId) it.copy(zIndex = minZ) else it
+        }
+        val updatedScene = current.copy(layers = updatedLayers)
+        _activeScene.value = updatedScene
+        saveSceneToDb(updatedScene)
+    }
+
+    fun moveLayerUp(layerId: String) {
+        val current = _activeScene.value ?: return
+        val updatedLayers = current.layers.map {
+            if (it.id == layerId) it.copy(zIndex = it.zIndex + 1) else it
+        }
+        val updatedScene = current.copy(layers = updatedLayers)
+        _activeScene.value = updatedScene
+        saveSceneToDb(updatedScene)
+    }
+
+    fun moveLayerDown(layerId: String) {
+        val current = _activeScene.value ?: return
+        val updatedLayers = current.layers.map {
+            if (it.id == layerId) it.copy(zIndex = (it.zIndex - 1).coerceAtLeast(0)) else it
+        }
+        val updatedScene = current.copy(layers = updatedLayers)
+        _activeScene.value = updatedScene
+        saveSceneToDb(updatedScene)
+    }
+
+    fun alignLayer(layerId: String, alignment: String) {
+        val current = _activeScene.value ?: return
+        val layer = current.layers.firstOrNull { it.id == layerId } ?: return
+        val (newX, newY) = when (alignment) {
+            "CENTER" -> Pair(((100f - layer.widthPct) / 2f).coerceAtLeast(0f), ((100f - layer.heightPct) / 2f).coerceAtLeast(0f))
+            "TOP" -> Pair(layer.xPct, 2f)
+            "BOTTOM" -> Pair(layer.xPct, (100f - layer.heightPct - 2f).coerceAtLeast(0f))
+            "LEFT" -> Pair(2f, layer.yPct)
+            "RIGHT" -> Pair((100f - layer.widthPct - 2f).coerceAtLeast(0f), layer.yPct)
+            else -> Pair(layer.xPct, layer.yPct)
+        }
+        updateLayerPosition(layerId, newX, newY)
     }
 
     fun addLayer(type: LayerType) {
@@ -362,6 +472,12 @@ class ViperStudioViewModel(application: Application) : AndroidViewModel(applicat
 
     fun setCodec(codec: VideoCodecType) {
         val updated = _streamConfig.value.copy(codec = codec)
+        _streamConfig.value = updated
+        prefsRepo.saveStreamConfig(updated)
+    }
+
+    fun setRateControl(mode: RateControlMode) {
+        val updated = _streamConfig.value.copy(rateControl = mode)
         _streamConfig.value = updated
         prefsRepo.saveStreamConfig(updated)
     }
@@ -558,12 +674,93 @@ class ViperStudioViewModel(application: Application) : AndroidViewModel(applicat
 
     fun sendChatMessage(text: String) {
         if (text.isBlank()) return
-        val msg = ChatMessage(
-            sender = "Streamer (You)",
-            text = text,
-            badgeColorHex = "#FF1744"
+        ytEngine.sendChatMessage(text)
+    }
+
+    // YouTube Channel Connection & OAuth
+    fun signInWithGoogle(
+        context: Context,
+        onSuccess: (YouTubeChannelInfo) -> Unit = {},
+        onError: (String) -> Unit = {}
+    ) {
+        ytEngine.signInWithGoogle(context, { channel ->
+            if (channel.streamKey.isNotBlank()) {
+                _streamConfig.value = _streamConfig.value.copy(
+                    streamKey = channel.streamKey,
+                    rtmpUrl = channel.rtmpIngestUrl.ifBlank { "rtmp://a.rtmp.youtube.com/live2" }
+                )
+            }
+            onSuccess(channel)
+        }, onError)
+    }
+
+    fun disconnectYouTubeChannel() {
+        ytEngine.disconnectChannel()
+    }
+
+    fun syncYouTubeBroadcast(onComplete: (Boolean) -> Unit = {}) {
+        ytEngine.syncBroadcastDetails { success ->
+            val channel = ytEngine.channelInfo.value
+            if (success && channel.streamKey.isNotBlank()) {
+                _streamConfig.value = _streamConfig.value.copy(
+                    streamKey = channel.streamKey,
+                    rtmpUrl = channel.rtmpIngestUrl.ifBlank { "rtmp://a.rtmp.youtube.com/live2" }
+                )
+            }
+            onComplete(success)
+        }
+    }
+
+    fun applyYouTubeStreamKeyToConfig() {
+        val channel = ytEngine.channelInfo.value
+        if (channel.streamKey.isNotBlank()) {
+            _streamConfig.value = _streamConfig.value.copy(
+                streamKey = channel.streamKey,
+                rtmpUrl = channel.rtmpIngestUrl.ifBlank { "rtmp://a.rtmp.youtube.com/live2" }
+            )
+        }
+    }
+
+    // Live Chat Overlay Settings (Draggable, Opacity, Font Size, Lock)
+    fun updateLiveChatPosition(xPct: Float, yPct: Float) {
+        val current = _liveChatSettings.value
+        val updated = current.copy(
+            xPct = xPct.coerceIn(0f, 100f - current.widthPct),
+            yPct = yPct.coerceIn(0f, 100f - current.heightPct)
         )
-        _chatMessages.value = _chatMessages.value + msg
+        _liveChatSettings.value = updated
+        prefsRepo.saveLiveChatSettings(updated)
+    }
+
+    fun updateLiveChatSize(widthPct: Float, heightPct: Float) {
+        val current = _liveChatSettings.value
+        val updated = current.copy(
+            widthPct = widthPct.coerceIn(20f, 95f),
+            heightPct = heightPct.coerceIn(15f, 80f)
+        )
+        _liveChatSettings.value = updated
+        prefsRepo.saveLiveChatSettings(updated)
+    }
+
+    fun updateLiveChatOpacity(opacity: Float) {
+        val current = _liveChatSettings.value
+        val updated = current.copy(backgroundOpacity = opacity.coerceIn(0.1f, 1.0f))
+        _liveChatSettings.value = updated
+        prefsRepo.saveLiveChatSettings(updated)
+    }
+
+    fun updateLiveChatFontSize(sizeSp: Int) {
+        val current = _liveChatSettings.value
+        val updated = current.copy(fontSizeSp = sizeSp.coerceIn(8, 20))
+        _liveChatSettings.value = updated
+        prefsRepo.saveLiveChatSettings(updated)
+    }
+
+    fun toggleLiveChatLock() {
+        val current = _liveChatSettings.value
+        val updated = current.copy(isLocked = !current.isLocked)
+        _liveChatSettings.value = updated
+        prefsRepo.saveLiveChatSettings(updated)
     }
 
     override fun onCleared() {

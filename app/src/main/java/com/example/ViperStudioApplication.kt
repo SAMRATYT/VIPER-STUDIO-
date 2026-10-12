@@ -22,6 +22,7 @@ class ViperStudioApplication : Application() {
     val preferencesRepository by lazy { AppPreferencesRepository(this) }
     val audioMixerEngine by lazy { AudioMixerEngine(this) }
     val rtmpStreamEngine by lazy { RtmpStreamEngine(this) }
+    val youTubeSyncEngine by lazy { com.example.engine.youtube.YouTubeSyncEngine(this) }
     val localMirrorServer by lazy { LocalMirrorServer(this) }
     val screenRecorderManager by lazy { ScreenRecorderManager(this, database) }
 
@@ -240,6 +241,8 @@ class ViperStudioApplication : Application() {
                 obj.put("bgColorHex", l.bgColorHex)
                 obj.put("pipShape", l.pipShape)
                 obj.put("isMarqueeScroll", l.isMarqueeScroll)
+                obj.put("opacity", l.opacity.toDouble())
+                obj.put("imageUrl", l.imageUrl)
                 array.put(obj)
             }
             return array.toString()
@@ -261,6 +264,7 @@ class ViperStudioApplication : Application() {
                             widthPct = obj.getDouble("widthPct").toFloat(),
                             heightPct = obj.getDouble("heightPct").toFloat(),
                             rotationDeg = obj.optDouble("rotationDeg", 0.0).toFloat(),
+                            opacity = obj.optDouble("opacity", 1.0).toFloat(),
                             isVisible = obj.optBoolean("isVisible", true),
                             isLocked = obj.optBoolean("isLocked", false),
                             zIndex = obj.optInt("zIndex", i),
@@ -268,7 +272,8 @@ class ViperStudioApplication : Application() {
                             textColorHex = obj.optString("textColorHex", "#00E676"),
                             bgColorHex = obj.optString("bgColorHex", "#B3111722"),
                             pipShape = obj.optString("pipShape", "ROUNDED"),
-                            isMarqueeScroll = obj.optBoolean("isMarqueeScroll", false)
+                            isMarqueeScroll = obj.optBoolean("isMarqueeScroll", false),
+                            imageUrl = obj.optString("imageUrl", "")
                         )
                     )
                 }

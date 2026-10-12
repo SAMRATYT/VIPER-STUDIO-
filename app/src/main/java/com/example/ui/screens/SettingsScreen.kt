@@ -17,16 +17,27 @@ import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.filled.AccountCircle
+import androidx.compose.material.icons.filled.Chat
+import androidx.compose.material.icons.filled.CheckCircle
 import androidx.compose.material.icons.filled.GraphicEq
+import androidx.compose.material.icons.filled.LinkOff
 import androidx.compose.material.icons.filled.Memory
+import androidx.compose.material.icons.filled.Sync
 import androidx.compose.material.icons.filled.Tune
 import androidx.compose.material.icons.filled.Videocam
+import androidx.compose.material3.Button
+import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.Card
 import androidx.compose.material3.CardDefaults
+import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.Icon
+import androidx.compose.material3.IconButton
+import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.Slider
 import androidx.compose.material3.SliderDefaults
 import androidx.compose.material3.Switch
@@ -39,9 +50,13 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.layout.ContentScale
+import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import coil.compose.AsyncImage
+import coil.request.ImageRequest
 import com.example.data.model.AudioCaptureMode
 import com.example.data.model.FpsOption
 import com.example.data.model.RateControlMode
@@ -63,7 +78,11 @@ fun SettingsScreen(
 ) {
     val streamConfig by viewModel.streamConfig.collectAsState()
     val audioConfig by viewModel.audioConfig.collectAsState()
+    val youTubeChannelInfo by viewModel.youTubeChannelInfo.collectAsState()
+    val isYouTubeSyncing by viewModel.isYouTubeSyncing.collectAsState()
+    val liveChatSettings by viewModel.liveChatSettings.collectAsState()
     val hwProfile = viewModel.hardwareProfile
+    val context = LocalContext.current
 
     Column(
         modifier = modifier
@@ -89,6 +108,171 @@ fun SettingsScreen(
             )
         }
 
+        // Section 0: YouTube Channel & OAuth Synchronization
+        Card(
+            modifier = Modifier.fillMaxWidth(),
+            colors = CardDefaults.cardColors(containerColor = ViperSurfaceCard),
+            shape = RoundedCornerShape(14.dp)
+        ) {
+            Column(modifier = Modifier.padding(14.dp), verticalArrangement = Arrangement.spacedBy(12.dp)) {
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.SpaceBetween,
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                        Icon(Icons.Default.AccountCircle, contentDescription = null, tint = Color(0xFFFF0000), modifier = Modifier.size(20.dp))
+                        Text(
+                            text = "YOUTUBE CHANNEL & BROADCAST SYNC",
+                            fontSize = 12.sp,
+                            fontWeight = FontWeight.Bold,
+                            color = TextPrimary
+                        )
+                    }
+                    if (youTubeChannelInfo.isConnected) {
+                        Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(4.dp)) {
+                            Icon(Icons.Default.CheckCircle, contentDescription = null, tint = ViperGreen, modifier = Modifier.size(14.dp))
+                            Text("CONNECTED", fontSize = 10.sp, fontWeight = FontWeight.Bold, color = ViperGreen)
+                        }
+                    }
+                }
+
+                if (!youTubeChannelInfo.isConnected) {
+                    Text(
+                        text = "Connect with Google OAuth to authenticate your YouTube channel, auto-retrieve broadcast stream keys, and enable live chat synchronization.",
+                        fontSize = 11.sp,
+                        color = TextSecondary
+                    )
+
+                    Button(
+                        onClick = { viewModel.signInWithGoogle(context) },
+                        colors = ButtonDefaults.buttonColors(containerColor = Color(0xFFFF0000), contentColor = Color.White),
+                        shape = RoundedCornerShape(8.dp),
+                        modifier = Modifier.fillMaxWidth()
+                    ) {
+                        Icon(Icons.Default.Sync, contentDescription = null, modifier = Modifier.size(16.dp))
+                        Spacer(modifier = Modifier.width(6.dp))
+                        Text("Sign In with Google (Connect YouTube)", fontSize = 12.sp, fontWeight = FontWeight.Bold)
+                    }
+                } else {
+                    // Connected Channel Details Card
+                    Row(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .clip(RoundedCornerShape(8.dp))
+                            .background(Color(0xFF101726))
+                            .padding(10.dp),
+                        verticalAlignment = Alignment.CenterVertically,
+                        horizontalArrangement = Arrangement.spacedBy(10.dp)
+                    ) {
+                        if (youTubeChannelInfo.avatarUrl.isNotBlank()) {
+                            AsyncImage(
+                                model = ImageRequest.Builder(context)
+                                    .data(youTubeChannelInfo.avatarUrl)
+                                    .crossfade(true)
+                                    .build(),
+                                contentDescription = "Channel Avatar",
+                                contentScale = ContentScale.Crop,
+                                modifier = Modifier
+                                    .size(36.dp)
+                                    .clip(CircleShape)
+                            )
+                        } else {
+                            Box(
+                                modifier = Modifier
+                                    .size(36.dp)
+                                    .clip(CircleShape)
+                                    .background(Color(0xFF26334D)),
+                                contentAlignment = Alignment.Center
+                            ) {
+                                Text(
+                                    text = youTubeChannelInfo.channelTitle.take(1).uppercase(),
+                                    fontSize = 16.sp,
+                                    fontWeight = FontWeight.Bold,
+                                    color = ViperCyan
+                                )
+                            }
+                        }
+
+                        Column(modifier = Modifier.weight(1f)) {
+                            Text(
+                                text = youTubeChannelInfo.channelTitle,
+                                fontSize = 13.sp,
+                                fontWeight = FontWeight.Bold,
+                                color = TextPrimary
+                            )
+                            Text(
+                                text = "${youTubeChannelInfo.channelHandle} • ${youTubeChannelInfo.subscriberCountText}",
+                                fontSize = 10.sp,
+                                color = TextMuted
+                            )
+                        }
+                    }
+
+                    // Active Broadcast Info
+                    Column(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .clip(RoundedCornerShape(8.dp))
+                            .background(Color(0xFF0D1422))
+                            .padding(10.dp),
+                        verticalArrangement = Arrangement.spacedBy(4.dp)
+                    ) {
+                        Text(
+                            text = "ACTIVE BROADCAST",
+                            fontSize = 9.sp,
+                            fontWeight = FontWeight.Bold,
+                            color = ViperCyan
+                        )
+                        Text(
+                            text = youTubeChannelInfo.activeBroadcastTitle,
+                            fontSize = 11.sp,
+                            fontWeight = FontWeight.SemiBold,
+                            color = TextPrimary
+                        )
+                        Text(
+                            text = "Ingest URL: ${youTubeChannelInfo.rtmpIngestUrl}",
+                            fontSize = 9.sp,
+                            color = TextMuted
+                        )
+                    }
+
+                    // Sync & Disconnect Buttons
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        horizontalArrangement = Arrangement.spacedBy(8.dp)
+                    ) {
+                        Button(
+                            onClick = { viewModel.syncYouTubeBroadcast() },
+                            enabled = !isYouTubeSyncing,
+                            colors = ButtonDefaults.buttonColors(containerColor = ViperGreen, contentColor = Color.Black),
+                            shape = RoundedCornerShape(8.dp),
+                            modifier = Modifier.weight(1f)
+                        ) {
+                            if (isYouTubeSyncing) {
+                                CircularProgressIndicator(modifier = Modifier.size(14.dp), color = Color.Black, strokeWidth = 2.dp)
+                            } else {
+                                Icon(Icons.Default.Sync, contentDescription = null, modifier = Modifier.size(14.dp))
+                            }
+                            Spacer(modifier = Modifier.width(4.dp))
+                            Text("Sync Broadcast", fontSize = 11.sp, fontWeight = FontWeight.Bold)
+                        }
+
+                        OutlinedButton(
+                            onClick = { viewModel.disconnectYouTubeChannel() },
+                            colors = ButtonDefaults.outlinedButtonColors(contentColor = Color(0xFFFF5252)),
+                            shape = RoundedCornerShape(8.dp),
+                            modifier = Modifier.weight(1f)
+                        ) {
+                            Icon(Icons.Default.LinkOff, contentDescription = null, modifier = Modifier.size(14.dp))
+                            Spacer(modifier = Modifier.width(4.dp))
+                            Text("Disconnect", fontSize = 11.sp)
+                        }
+                    }
+                }
+            }
+        }
+
         // Section 1: Video Encoding
         Card(
             modifier = Modifier.fillMaxWidth(),
@@ -99,25 +283,28 @@ fun SettingsScreen(
                 Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                     Icon(Icons.Default.Videocam, contentDescription = null, tint = ViperGreen, modifier = Modifier.size(18.dp))
                     Text(
-                        text = "VIDEO ENCODER & BITRATE",
+                        text = "VIDEO ENCODING CONFIGURATION",
                         fontSize = 12.sp,
                         fontWeight = FontWeight.Bold,
-                        color = ViperGreen
+                        color = TextPrimary
                     )
                 }
 
-                // Stream Orientation (Landscape 16:9 vs Vertical 9:16)
-                Column(verticalArrangement = Arrangement.spacedBy(4.dp)) {
-                    Text("Stream & Recording Orientation", fontSize = 11.sp, color = TextSecondary)
-                    Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                // Stream Orientation Setting (Landscape 16:9 vs Portrait 9:16)
+                Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
+                    Text("STREAM ORIENTATION", fontSize = 10.sp, fontWeight = FontWeight.Bold, color = TextMuted)
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        horizontalArrangement = Arrangement.spacedBy(8.dp)
+                    ) {
                         SettingPill(
-                            label = "Landscape (16:9 • 1280×720)",
+                            label = "Landscape (16:9 - 1280×720)",
                             isSelected = streamConfig.isLandscape,
                             onClick = { viewModel.setOrientation(true) },
                             modifier = Modifier.weight(1f)
                         )
                         SettingPill(
-                            label = "Portrait (9:16 • 720×1280)",
+                            label = "Portrait (9:16 - 720×1280)",
                             isSelected = !streamConfig.isLandscape,
                             onClick = { viewModel.setOrientation(false) },
                             modifier = Modifier.weight(1f)
@@ -133,65 +320,21 @@ fun SettingsScreen(
                     )
                 }
 
-                // Resolution
-                Column(verticalArrangement = Arrangement.spacedBy(4.dp)) {
-                    Text("Target Resolution", fontSize = 11.sp, color = TextSecondary)
-                    FlowRow(horizontalArrangement = Arrangement.spacedBy(8.dp), verticalArrangement = Arrangement.spacedBy(6.dp)) {
-                        ResolutionOption.values().forEach { res ->
-                            val isSel = streamConfig.resolution == res
-                            SettingPill(
-                                label = res.label,
-                                isSelected = isSel,
-                                onClick = { viewModel.setResolution(res) }
-                            )
-                        }
-                    }
-                }
-
-                // FPS
-                Column(verticalArrangement = Arrangement.spacedBy(4.dp)) {
-                    Text("Frame Rate (FPS)", fontSize = 11.sp, color = TextSecondary)
-                    Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                        FpsOption.values().forEach { fps ->
-                            val isSel = streamConfig.fps == fps
-                            SettingPill(
-                                label = fps.label,
-                                isSelected = isSel,
-                                onClick = { viewModel.setFps(fps) },
-                                modifier = Modifier.weight(1f)
-                            )
-                        }
-                    }
-                }
-
-                // Bitrate Slider (500 to 12000 Kbps)
-                Column {
-                    Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween) {
-                        Text("Video Bitrate", fontSize = 12.sp, color = TextPrimary)
-                        Text("${streamConfig.bitrateKbps} Kbps", fontSize = 12.sp, color = ViperGreen, fontWeight = FontWeight.Bold)
-                    }
-                    Slider(
-                        value = streamConfig.bitrateKbps.toFloat(),
-                        onValueChange = { viewModel.setBitrate(it.toInt()) },
-                        valueRange = 500f..12000f,
-                        colors = SliderDefaults.colors(thumbColor = ViperGreen, activeTrackColor = ViperGreen)
-                    )
-                    Text(
-                        text = "Recommended for ${streamConfig.resolution.label.substringBefore(" ")}: ${streamConfig.resolution.recommendedBitrate} Kbps",
-                        fontSize = 10.sp,
-                        color = TextMuted
-                    )
-                }
-
-                // Codec Selection (H.264 vs H.265)
-                Column(verticalArrangement = Arrangement.spacedBy(4.dp)) {
-                    Text("Hardware Video Codec", fontSize = 11.sp, color = TextSecondary)
-                    Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                // Video Codec Type (Hardware H.264 vs H.265)
+                Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
+                    Text("VIDEO CODEC", fontSize = 10.sp, fontWeight = FontWeight.Bold, color = TextMuted)
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        horizontalArrangement = Arrangement.spacedBy(8.dp)
+                    ) {
                         VideoCodecType.values().forEach { codec ->
-                            val isSel = streamConfig.codec == codec
+                            val isSupported = when (codec) {
+                                VideoCodecType.H264_AVC -> hwProfile.hasHardwareAvc
+                                VideoCodecType.H265_HEVC -> hwProfile.hasHardwareHevc
+                            }
                             SettingPill(
-                                label = codec.displayName.substringBefore(" ("),
-                                isSelected = isSel,
+                                label = "${codec.displayName} ${if (isSupported) "(HW)" else "(SW)"}",
+                                isSelected = streamConfig.codec == codec,
                                 onClick = { viewModel.setCodec(codec) },
                                 modifier = Modifier.weight(1f)
                             )
@@ -199,42 +342,80 @@ fun SettingsScreen(
                     }
                 }
 
-                // Toggles: Adaptive Bitrate & Low Latency
-                Row(
-                    modifier = Modifier.fillMaxWidth(),
-                    horizontalArrangement = Arrangement.SpaceBetween,
-                    verticalAlignment = Alignment.CenterVertically
-                ) {
-                    Column {
-                        Text("Adaptive Bitrate (ABR)", fontSize = 12.sp, color = TextPrimary, fontWeight = FontWeight.SemiBold)
-                        Text("Automatically reduces bitrate during network drops", fontSize = 10.sp, color = TextMuted)
+                // Resolution Selection
+                Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
+                    Text("STREAM RESOLUTION", fontSize = 10.sp, fontWeight = FontWeight.Bold, color = TextMuted)
+                    FlowRow(
+                        horizontalArrangement = Arrangement.spacedBy(8.dp),
+                        verticalArrangement = Arrangement.spacedBy(6.dp)
+                    ) {
+                        ResolutionOption.values().forEach { res ->
+                            SettingPill(
+                                label = res.label,
+                                isSelected = streamConfig.resolution == res,
+                                onClick = { viewModel.setResolution(res) }
+                            )
+                        }
                     }
-                    Switch(
-                        checked = streamConfig.isAdaptiveBitrateEnabled,
-                        onCheckedChange = { viewModel.toggleAdaptiveBitrate() },
-                        colors = SwitchDefaults.colors(checkedThumbColor = ViperGreen, checkedTrackColor = Color(0xFF00391A))
+                }
+
+                // FPS Selection
+                Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
+                    Text("FRAME RATE (FPS)", fontSize = 10.sp, fontWeight = FontWeight.Bold, color = TextMuted)
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        horizontalArrangement = Arrangement.spacedBy(8.dp)
+                    ) {
+                        FpsOption.values().forEach { fps ->
+                            SettingPill(
+                                label = "${fps.value} FPS ${if (fps.value == 60) "(Pro)" else "(Standard)"}",
+                                isSelected = streamConfig.fps == fps,
+                                onClick = { viewModel.setFps(fps) },
+                                modifier = Modifier.weight(1f)
+                            )
+                        }
+                    }
+                }
+
+                // Bitrate Slider (1,000 kbps to 12,000 kbps)
+                Column(verticalArrangement = Arrangement.spacedBy(4.dp)) {
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        horizontalArrangement = Arrangement.SpaceBetween
+                    ) {
+                        Text("TARGET VIDEO BITRATE", fontSize = 10.sp, fontWeight = FontWeight.Bold, color = TextMuted)
+                        Text("${streamConfig.bitrateKbps} kbps", fontSize = 11.sp, color = ViperGreen, fontWeight = FontWeight.Bold)
+                    }
+                    Slider(
+                        value = streamConfig.bitrateKbps.toFloat(),
+                        onValueChange = { viewModel.setBitrate(it.toInt()) },
+                        valueRange = 1000f..12000f,
+                        steps = 22,
+                        colors = SliderDefaults.colors(thumbColor = ViperGreen, activeTrackColor = ViperGreen)
                     )
                 }
 
-                Row(
-                    modifier = Modifier.fillMaxWidth(),
-                    horizontalArrangement = Arrangement.SpaceBetween,
-                    verticalAlignment = Alignment.CenterVertically
-                ) {
-                    Column {
-                        Text("Ultra Low Latency Mode", fontSize = 12.sp, color = TextPrimary, fontWeight = FontWeight.SemiBold)
-                        Text("Minimizes stream delay for real-time viewer interaction", fontSize = 10.sp, color = TextMuted)
+                // Rate Control Mode
+                Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
+                    Text("RATE CONTROL MODE", fontSize = 10.sp, fontWeight = FontWeight.Bold, color = TextMuted)
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        horizontalArrangement = Arrangement.spacedBy(8.dp)
+                    ) {
+                        RateControlMode.values().forEach { mode ->
+                            SettingPill(
+                                label = mode.displayName,
+                                isSelected = streamConfig.rateControl == mode,
+                                onClick = { viewModel.setRateControl(mode) },
+                                modifier = Modifier.weight(1f)
+                            )
+                        }
                     }
-                    Switch(
-                        checked = streamConfig.isLowLatencyEnabled,
-                        onCheckedChange = { viewModel.toggleLowLatency() },
-                        colors = SwitchDefaults.colors(checkedThumbColor = ViperCyan, checkedTrackColor = Color(0xFF003D4D))
-                    )
                 }
             }
         }
 
-        // Section 2: Advanced Audio & Sync Delay
+        // Section 2: Advanced Audio & Latency
         Card(
             modifier = Modifier.fillMaxWidth(),
             colors = CardDefaults.cardColors(containerColor = ViperSurfaceCard),
@@ -244,45 +425,28 @@ fun SettingsScreen(
                 Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                     Icon(Icons.Default.GraphicEq, contentDescription = null, tint = ViperCyan, modifier = Modifier.size(18.dp))
                     Text(
-                        text = "AUDIO SYNC & ENHANCEMENT",
+                        text = "ADVANCED AUDIO & PIPELINE SYNC",
                         fontSize = 12.sp,
                         fontWeight = FontWeight.Bold,
-                        color = ViperCyan
+                        color = TextPrimary
                     )
                 }
 
-                // Audio Capture Mode Selection
+                // Audio Delay Adjustment Slider (-500ms to +500ms)
                 Column(verticalArrangement = Arrangement.spacedBy(4.dp)) {
-                    Text("Audio Capture Source Mode", fontSize = 11.sp, color = TextSecondary)
-                    Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                        AudioCaptureMode.values().forEach { mode ->
-                            val isSel = audioConfig.audioCaptureMode == mode
-                            SettingPill(
-                                label = mode.shortLabel,
-                                isSelected = isSel,
-                                onClick = { viewModel.setAudioCaptureMode(mode) },
-                                modifier = Modifier.weight(1f)
-                            )
-                        }
-                    }
-                }
-
-                // Audio Delay Offset (-500ms to +500ms)
-                Column {
-                    Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween) {
-                        Text("Audio Delay Correction", fontSize = 12.sp, color = TextPrimary)
-                        Text("${audioConfig.audioDelayMs} ms", fontSize = 12.sp, color = ViperCyan, fontWeight = FontWeight.Bold)
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        horizontalArrangement = Arrangement.SpaceBetween
+                    ) {
+                        Text("AUDIO / VIDEO SYNC OFFSET (DELAY)", fontSize = 10.sp, fontWeight = FontWeight.Bold, color = TextMuted)
+                        Text("${audioConfig.audioDelayMs} ms", fontSize = 11.sp, color = ViperCyan, fontWeight = FontWeight.Bold)
                     }
                     Slider(
                         value = audioConfig.audioDelayMs.toFloat(),
                         onValueChange = { viewModel.setAudioDelay(it.toInt()) },
                         valueRange = -500f..500f,
+                        steps = 20,
                         colors = SliderDefaults.colors(thumbColor = ViperCyan, activeTrackColor = ViperCyan)
-                    )
-                    Text(
-                        text = "Use positive offset (+ms) if Bluetooth headset audio lags behind video.",
-                        fontSize = 10.sp,
-                        color = TextMuted
                     )
                 }
 
@@ -293,30 +457,27 @@ fun SettingsScreen(
                     verticalAlignment = Alignment.CenterVertically
                 ) {
                     Column(modifier = Modifier.weight(1f)) {
-                        Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(6.dp)) {
-                            Text("Background Noise Reduction", fontSize = 12.sp, color = TextPrimary, fontWeight = FontWeight.SemiBold)
-                            Box(
-                                modifier = Modifier
-                                    .clip(RoundedCornerShape(4.dp))
-                                    .background(if (audioConfig.isNoiseSuppressionEnabled) ViperGreen.copy(alpha = 0.2f) else Color.Gray.copy(alpha = 0.2f))
-                                    .padding(horizontal = 6.dp, vertical = 2.dp)
-                            ) {
-                                Text(
-                                    text = if (audioConfig.isNoiseSuppressionEnabled) "ON" else "OFF",
-                                    fontSize = 9.sp,
-                                    fontWeight = FontWeight.Bold,
-                                    color = if (audioConfig.isNoiseSuppressionEnabled) ViperGreen else TextMuted
-                                )
-                            }
-                        }
+                        Text(
+                            text = "Background Noise Reduction",
+                            fontSize = 12.sp,
+                            color = TextPrimary,
+                            fontWeight = FontWeight.SemiBold
+                        )
                         Text(
                             text = if (audioConfig.isNoiseSuppressionEnabled)
-                                "ON: Active hardware NoiseSuppressor on microphone only (internal game audio is untouched)"
+                                "ON: NoiseSuppressor active for mic input only. Preserves natural internal BGMI game audio."
                             else
-                                "OFF: Raw unprocessed microphone audio with natural tone and zero audio filtering",
+                                "OFF: Natural raw microphone and game audio. No processing applied.",
                             fontSize = 10.sp,
-                            color = TextMuted
+                            color = if (audioConfig.isNoiseSuppressionEnabled) ViperGreen else TextMuted
                         )
+                        if (!hwProfile.hasNoiseSuppressor) {
+                            Text(
+                                text = "Notice: Hardware NoiseSuppressor not detected on this chipset; graceful fallback active.",
+                                fontSize = 9.sp,
+                                color = Color(0xFFFFD600)
+                            )
+                        }
                     }
                     Spacer(modifier = Modifier.width(8.dp))
                     Switch(
@@ -326,15 +487,17 @@ fun SettingsScreen(
                     )
                 }
 
+                // Acoustic Echo Cancellation Toggle
                 Row(
                     modifier = Modifier.fillMaxWidth(),
                     horizontalArrangement = Arrangement.SpaceBetween,
                     verticalAlignment = Alignment.CenterVertically
                 ) {
-                    Column {
+                    Column(modifier = Modifier.weight(1f)) {
                         Text("Acoustic Echo Cancellation", fontSize = 12.sp, color = TextPrimary, fontWeight = FontWeight.SemiBold)
                         Text("Prevents game speaker bleed into microphone", fontSize = 10.sp, color = TextMuted)
                     }
+                    Spacer(modifier = Modifier.width(8.dp))
                     Switch(
                         checked = audioConfig.isEchoCancellationEnabled,
                         onCheckedChange = { viewModel.toggleEchoCancellation() },

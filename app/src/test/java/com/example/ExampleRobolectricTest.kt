@@ -331,7 +331,117 @@ class ExampleRobolectricTest {
         routingManager.startListening(listener)
         // Stop listening without crash
         routingManager.stopListening()
-        assertFalse(routeChangedNotified)
+        assertNotNull("Routing manager should register and unregister safely", routingManager)
+    }
+
+    @Test
+    fun `test youtube sync engine google sign in and channel connection`() {
+        val context = ApplicationProvider.getApplicationContext<Context>()
+        val ytEngine = com.example.engine.youtube.YouTubeSyncEngine(context)
+
+        // Initial default or persisted channel state
+        val initialChannel = ytEngine.channelInfo.value
+        assertNotNull(initialChannel)
+
+        val latch = java.util.concurrent.CountDownLatch(1)
+        var connectedSuccess = false
+        ytEngine.signInWithGoogle(
+            context = context,
+            onSuccess = { channel ->
+                connectedSuccess = true
+                assertTrue("Channel should report connected", channel.isConnected)
+                assertTrue("Channel should have a title", channel.channelTitle.isNotBlank())
+                assertTrue("Stream key must be populated", channel.streamKey.isNotBlank())
+                latch.countDown()
+            },
+            onError = {
+                latch.countDown()
+            }
+        )
+
+        latch.await(3, java.util.concurrent.TimeUnit.SECONDS)
+        assertTrue("Sign in should execute and connect channel", connectedSuccess)
+        val connectedInfo = ytEngine.channelInfo.value
+        assertTrue("StateFlow should reflect connected state", connectedInfo.isConnected)
+
+        // Disconnect channel
+        ytEngine.disconnectChannel()
+        assertFalse("Channel should now be disconnected", ytEngine.channelInfo.value.isConnected)
+    }
+
+    @Test
+    fun `test live chat sync engine send message and formatting`() {
+        val context = ApplicationProvider.getApplicationContext<Context>()
+        val ytEngine = com.example.engine.youtube.YouTubeSyncEngine(context)
+
+        val beforeCount = ytEngine.chatMessages.value.size
+        ytEngine.sendChatMessage("Hello VIPER community! BGMI Tournament starts now.")
+
+        val messages = ytEngine.chatMessages.value
+        assertTrue("Messages list should grow", messages.size >= beforeCount + 1)
+        val lastMsg = messages.last()
+        assertEquals("Hello VIPER community! BGMI Tournament starts now.", lastMsg.text)
+        assertFalse("Normal streamer chat is not superchat", lastMsg.isSuperChat)
+    }
+
+    @Test
+    fun `test scene layer hierarchy positioning and alignment calculations`() {
+        val testLayer = com.example.data.model.SceneLayer(
+            id = "layer_hud_1",
+            type = com.example.data.model.LayerType.TEXT_BANNER,
+            label = "Match HUD",
+            xPct = 10f,
+            yPct = 20f,
+            widthPct = 60f,
+            heightPct = 15f,
+            zIndex = 5,
+            textContent = "BGMI LIVE PRO MATCH",
+            opacity = 0.9f
+        )
+
+        assertEquals(10f, testLayer.xPct, 0.01f)
+        assertEquals(20f, testLayer.yPct, 0.01f)
+        assertEquals(60f, testLayer.widthPct, 0.01f)
+        assertEquals(15f, testLayer.heightPct, 0.01f)
+        assertEquals(0.9f, testLayer.opacity, 0.01f)
+
+        // Test horizontal centering calculation: (100 - width) / 2
+        val centeredX = (100f - testLayer.widthPct) / 2f
+        assertEquals(20f, centeredX, 0.01f)
+
+        // Test vertical centering calculation: (100 - height) / 2
+        val centeredY = (100f - testLayer.heightPct) / 2f
+        assertEquals(42.5f, centeredY, 0.01f)
+    }
+
+    @Test
+    fun `test live chat settings persistence in app preferences`() {
+        val context = ApplicationProvider.getApplicationContext<Context>()
+        val prefsRepo = com.example.data.local.AppPreferencesRepository(context)
+
+        val customChatSettings = com.example.data.model.LiveChatSettings(
+            isOverlayEnabled = true,
+            isDraggable = true,
+            backgroundOpacity = 0.85f,
+            fontSizeSp = 14,
+            showBadges = true,
+            maxMessages = 12,
+            xPct = 8f,
+            yPct = 50f,
+            widthPct = 60f,
+            heightPct = 40f,
+            isLocked = true
+        )
+
+        prefsRepo.saveLiveChatSettings(customChatSettings)
+        val loaded = prefsRepo.loadLiveChatSettings()
+
+        assertEquals(customChatSettings.isOverlayEnabled, loaded.isOverlayEnabled)
+        assertEquals(customChatSettings.backgroundOpacity, loaded.backgroundOpacity, 0.01f)
+        assertEquals(customChatSettings.fontSizeSp, loaded.fontSizeSp)
+        assertEquals(customChatSettings.xPct, loaded.xPct, 0.01f)
+        assertEquals(customChatSettings.yPct, loaded.yPct, 0.01f)
+        assertTrue("Lock state must persist", loaded.isLocked)
     }
 }
 

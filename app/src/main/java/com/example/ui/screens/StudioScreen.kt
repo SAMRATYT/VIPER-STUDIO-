@@ -5,6 +5,7 @@ import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
+import androidx.compose.foundation.layout.BoxWithConstraints
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.ExperimentalLayoutApi
 import androidx.compose.foundation.layout.FlowRow
@@ -14,6 +15,7 @@ import androidx.compose.foundation.layout.aspectRatio
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.offset
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
@@ -22,18 +24,12 @@ import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
-import androidx.compose.material.icons.filled.Cameraswitch
-import androidx.compose.material.icons.filled.Chat
-import androidx.compose.material.icons.filled.FiberManualRecord
-import androidx.compose.material.icons.filled.Layers
 import androidx.compose.material.icons.filled.Mic
 import androidx.compose.material.icons.filled.MicOff
-import androidx.compose.material.icons.filled.NotificationsActive
-import androidx.compose.material.icons.filled.PlayArrow
-import androidx.compose.material.icons.filled.Stop
-import androidx.compose.material.icons.filled.VolumeUp
-import androidx.compose.material3.Button
-import androidx.compose.material3.ButtonDefaults
+import androidx.compose.material.icons.filled.Lock
+import androidx.compose.material.icons.filled.LockOpen
+import androidx.compose.material.icons.filled.RestartAlt
+import androidx.compose.material.icons.filled.Chat
 import androidx.compose.material3.Card
 import androidx.compose.material3.CardDefaults
 import androidx.compose.material3.Icon
@@ -49,12 +45,18 @@ import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.draw.alpha
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
-import androidx.compose.ui.platform.testTag
+import androidx.compose.ui.layout.ContentScale
+import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.unit.IntOffset
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import coil.compose.AsyncImage
+import coil.request.ImageRequest
 import com.example.data.model.AlertType
 import com.example.data.model.AudioCaptureMode
 import com.example.data.model.LayerType
@@ -89,7 +91,9 @@ fun StudioScreen(
     val activeAlert by viewModel.activeAlert.collectAsState()
     val chatMessages by viewModel.chatMessages.collectAsState()
     val isChatVisible by viewModel.isChatOverlayVisible.collectAsState()
+    val liveChatSettings by viewModel.liveChatSettings.collectAsState()
 
+    val context = LocalContext.current
     var cameraShape by remember { mutableStateOf("ROUNDED") }
 
     Column(
@@ -124,7 +128,7 @@ fun StudioScreen(
                     .padding(horizontal = 8.dp, vertical = 4.dp)
             ) {
                 Text(
-                    text = if (streamConfig.isLandscape) "Switch to 9:16" else "Switch to 16:9",
+                    text = if (streamConfig.isLandscape) "Rotate to 9:16" else "Rotate to 16:9",
                     fontSize = 10.sp,
                     color = ViperCyan,
                     fontWeight = FontWeight.SemiBold
@@ -132,8 +136,8 @@ fun StudioScreen(
             }
         }
 
-        // Studio Viewport (Broadcast Output Monitor)
-        Box(
+        // Studio Viewport (Broadcast Output Monitor with Dynamic Coordinates & Custom Draggable Chat)
+        BoxWithConstraints(
             modifier = (if (streamConfig.isLandscape) {
                 Modifier
                     .fillMaxWidth()
@@ -148,101 +152,185 @@ fun StudioScreen(
                 .border(2.dp, if (streamStats.isStreaming) LiveRed else ViperGreen, RoundedCornerShape(14.dp))
                 .background(Color(0xFF0E1422))
         ) {
-            // Render Scene Layers in Viewport
+            val canvasWidth = maxWidth
+            val canvasHeight = maxHeight
+            val density = LocalDensity.current
+            val canvasWidthPx = with(density) { canvasWidth.toPx() }
+            val canvasHeightPx = with(density) { canvasHeight.toPx() }
+
+            // Render Scene Layers in Viewport with dynamic positions & sizes
             activeScene?.layers?.sortedBy { it.zIndex }?.forEach { layer ->
                 if (layer.isVisible) {
-                    when (layer.type) {
-                        LayerType.GAME_SCREEN -> {
-                            Box(
-                                modifier = Modifier
-                                    .fillMaxSize()
-                                    .background(Color(0xFF0C121E)),
-                                contentAlignment = Alignment.Center
-                            ) {
-                                Text(
-                                    text = "GAMEPLAY VIDEO CANVAS\n1080p 60FPS BROADCAST",
-                                    fontSize = 12.sp,
-                                    color = Color(0xFF28364E),
-                                    fontWeight = FontWeight.Bold,
-                                    lineHeight = 16.sp
-                                )
-                            }
-                        }
+                    val xOffset = (canvasWidth * (layer.xPct / 100f))
+                    val yOffset = (canvasHeight * (layer.yPct / 100f))
+                    val layerW = (canvasWidth * (layer.widthPct / 100f))
+                    val layerH = (canvasHeight * (layer.heightPct / 100f))
+                    val layerAlpha = layer.opacity.coerceIn(0.05f, 1.0f)
 
-                        LayerType.CAMERA_PIP -> {
-                            if (isCameraActive) {
-                                CameraPreviewView(
-                                    lensFacing = lensFacing,
-                                    isCameraActive = isCameraActive,
-                                    shapeType = cameraShape,
-                                    onSwitchCamera = { viewModel.switchCameraLens() },
+                    Box(
+                        modifier = Modifier
+                            .offset { IntOffset(xOffset.roundToPx(), yOffset.roundToPx()) }
+                            .size(width = layerW, height = layerH)
+                            .alpha(layerAlpha)
+                    ) {
+                        when (layer.type) {
+                            LayerType.GAME_SCREEN -> {
+                                Box(
                                     modifier = Modifier
-                                        .align(Alignment.TopEnd)
-                                        .padding(8.dp)
-                                        .size(width = 110.dp, height = 75.dp)
+                                        .fillMaxSize()
+                                        .background(Color(0xFF0C121E)),
+                                    contentAlignment = Alignment.Center
+                                ) {
+                                    Text(
+                                        text = "GAMEPLAY VIDEO CANVAS\n1080p 60FPS BROADCAST",
+                                        fontSize = 11.sp,
+                                        color = Color(0xFF28364E),
+                                        fontWeight = FontWeight.Bold,
+                                        lineHeight = 15.sp
+                                    )
+                                }
+                            }
+
+                            LayerType.CAMERA_PIP -> {
+                                if (isCameraActive) {
+                                    CameraPreviewView(
+                                        lensFacing = lensFacing,
+                                        isCameraActive = isCameraActive,
+                                        shapeType = cameraShape,
+                                        onSwitchCamera = { viewModel.switchCameraLens() },
+                                        modifier = Modifier.fillMaxSize()
+                                    )
+                                }
+                            }
+
+                            LayerType.TEXT_BANNER -> {
+                                val bannerBg = try {
+                                    Color(android.graphics.Color.parseColor(layer.bgColorHex))
+                                } catch (_: Exception) {
+                                    Color(0xD90A0E17)
+                                }
+                                val textColor = try {
+                                    Color(android.graphics.Color.parseColor(layer.textColorHex))
+                                } catch (_: Exception) {
+                                    ViperGreen
+                                }
+
+                                Box(
+                                    modifier = Modifier
+                                        .fillMaxSize()
+                                        .clip(RoundedCornerShape(4.dp))
+                                        .background(bannerBg)
+                                        .padding(horizontal = 6.dp, vertical = 2.dp),
+                                    contentAlignment = Alignment.CenterStart
+                                ) {
+                                    Text(
+                                        text = layer.textContent,
+                                        fontSize = 10.sp,
+                                        color = textColor,
+                                        fontWeight = FontWeight.Bold,
+                                        maxLines = 2
+                                    )
+                                }
+                            }
+
+                            LayerType.SOCIAL_BADGE -> {
+                                val badgeBg = try {
+                                    Color(android.graphics.Color.parseColor(layer.bgColorHex))
+                                } catch (_: Exception) {
+                                    Color(0xB3111722)
+                                }
+                                val badgeTextColor = try {
+                                    Color(android.graphics.Color.parseColor(layer.textColorHex))
+                                } catch (_: Exception) {
+                                    ViperCyan
+                                }
+
+                                Box(
+                                    modifier = Modifier
+                                        .fillMaxSize()
+                                        .clip(RoundedCornerShape(4.dp))
+                                        .background(badgeBg)
+                                        .padding(horizontal = 6.dp, vertical = 2.dp),
+                                    contentAlignment = Alignment.CenterStart
+                                ) {
+                                    Text(
+                                        text = layer.textContent,
+                                        fontSize = 9.sp,
+                                        color = badgeTextColor,
+                                        fontWeight = FontWeight.SemiBold,
+                                        maxLines = 1
+                                    )
+                                }
+                            }
+
+                            LayerType.ALERT_BOX -> {
+                                AlertOverlay(
+                                    alert = activeAlert,
+                                    modifier = Modifier.fillMaxSize()
                                 )
                             }
-                        }
 
-                        LayerType.TEXT_BANNER -> {
-                            Box(
-                                modifier = Modifier
-                                    .align(Alignment.BottomCenter)
-                                    .fillMaxWidth()
-                                    .background(Color(0xD90A0E17))
-                                    .padding(vertical = 4.dp, horizontal = 8.dp)
-                            ) {
-                                Text(
-                                    text = layer.textContent,
-                                    fontSize = 10.sp,
-                                    color = ViperGreen,
-                                    fontWeight = FontWeight.Bold,
-                                    maxLines = 1
-                                )
+                            LayerType.IMAGE_OVERLAY -> {
+                                if (layer.imageUrl.isNotBlank()) {
+                                    AsyncImage(
+                                        model = ImageRequest.Builder(context)
+                                            .data(layer.imageUrl)
+                                            .crossfade(true)
+                                            .build(),
+                                        contentDescription = layer.label,
+                                        contentScale = if (layer.widthPct >= 90f) ContentScale.Crop else ContentScale.Fit,
+                                        modifier = Modifier.fillMaxSize()
+                                    )
+                                } else {
+                                    val bgCol = try {
+                                        Color(android.graphics.Color.parseColor(layer.bgColorHex))
+                                    } catch (_: Exception) {
+                                        Color(0x33B388FF)
+                                    }
+                                    Box(
+                                        modifier = Modifier
+                                            .fillMaxSize()
+                                            .clip(RoundedCornerShape(6.dp))
+                                            .background(bgCol)
+                                            .border(1.dp, ViperGreen.copy(alpha = 0.4f), RoundedCornerShape(6.dp)),
+                                        contentAlignment = Alignment.Center
+                                    ) {
+                                        Text(
+                                            text = layer.label,
+                                            fontSize = 9.sp,
+                                            fontWeight = FontWeight.Bold,
+                                            color = ViperGreen
+                                        )
+                                    }
+                                }
                             }
                         }
-
-                        LayerType.SOCIAL_BADGE -> {
-                            Box(
-                                modifier = Modifier
-                                    .align(Alignment.TopStart)
-                                    .padding(8.dp)
-                                    .clip(RoundedCornerShape(4.dp))
-                                    .background(Color(0xB3111722))
-                                    .padding(horizontal = 6.dp, vertical = 2.dp)
-                            ) {
-                                Text(
-                                    text = layer.textContent,
-                                    fontSize = 9.sp,
-                                    color = ViperCyan,
-                                    fontWeight = FontWeight.SemiBold
-                                )
-                            }
-                        }
-
-                        LayerType.ALERT_BOX -> {
-                            AlertOverlay(
-                                alert = activeAlert,
-                                modifier = Modifier
-                                    .align(Alignment.Center)
-                                    .padding(8.dp)
-                            )
-                        }
-
-                        else -> {}
                     }
                 }
             }
 
-            // Live Chat Viewport Overlay
-            if (isChatVisible) {
+            // Customizable Draggable Live Chat Viewport Overlay
+            if (isChatVisible && liveChatSettings.isOverlayEnabled) {
+                val chatX = (canvasWidth * (liveChatSettings.xPct / 100f))
+                val chatY = (canvasHeight * (liveChatSettings.yPct / 100f))
+                val chatW = (canvasWidth * (liveChatSettings.widthPct / 100f))
+
                 LiveChatOverlay(
                     messages = chatMessages,
                     onSendMessage = { viewModel.sendChatMessage(it) },
+                    settings = liveChatSettings,
+                    onDragDelta = { dx, dy ->
+                        val deltaXPct = if (canvasWidthPx > 0f) (dx / canvasWidthPx) * 100f else 0f
+                        val deltaYPct = if (canvasHeightPx > 0f) (dy / canvasHeightPx) * 100f else 0f
+                        viewModel.updateLiveChatPosition(
+                            liveChatSettings.xPct + deltaXPct,
+                            liveChatSettings.yPct + deltaYPct
+                        )
+                    },
+                    onToggleLock = { viewModel.toggleLiveChatLock() },
                     modifier = Modifier
-                        .align(Alignment.BottomStart)
-                        .padding(8.dp)
-                        .fillMaxWidth(0.55f)
+                        .offset { IntOffset(chatX.roundToPx(), chatY.roundToPx()) }
+                        .width(chatW)
                 )
             }
         }
@@ -305,6 +393,98 @@ fun StudioScreen(
                         isActive = isChatVisible,
                         onClick = { viewModel.toggleChatOverlay() }
                     )
+                }
+            }
+        }
+
+        // Customizable Draggable Live Chat Overlay Controls Card
+        Card(
+            modifier = Modifier.fillMaxWidth(),
+            colors = CardDefaults.cardColors(containerColor = ViperSurfaceCard),
+            shape = RoundedCornerShape(12.dp)
+        ) {
+            Column(modifier = Modifier.padding(14.dp), verticalArrangement = Arrangement.spacedBy(10.dp)) {
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.SpaceBetween,
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+                        Icon(Icons.Default.Chat, contentDescription = null, tint = ViperCyan, modifier = Modifier.size(16.dp))
+                        Text(
+                            text = "LIVE CHAT OVERLAY CUSTOMIZATION",
+                            fontSize = 11.sp,
+                            fontWeight = FontWeight.Bold,
+                            color = TextSecondary
+                        )
+                    }
+
+                    Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(4.dp)) {
+                        IconButton(
+                            onClick = { viewModel.toggleLiveChatLock() },
+                            modifier = Modifier.size(28.dp)
+                        ) {
+                            Icon(
+                                imageVector = if (liveChatSettings.isLocked) Icons.Default.Lock else Icons.Default.LockOpen,
+                                contentDescription = "Lock Chat",
+                                tint = if (liveChatSettings.isLocked) Color(0xFFFFD600) else ViperCyan,
+                                modifier = Modifier.size(14.dp)
+                            )
+                        }
+
+                        IconButton(
+                            onClick = { viewModel.updateLiveChatPosition(5f, 45f) },
+                            modifier = Modifier.size(28.dp)
+                        ) {
+                            Icon(
+                                imageVector = Icons.Default.RestartAlt,
+                                contentDescription = "Reset Position",
+                                tint = TextMuted,
+                                modifier = Modifier.size(14.dp)
+                            )
+                        }
+                    }
+                }
+
+                // Opacity Slider
+                Column {
+                    Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween) {
+                        Text("Chat Background Opacity", fontSize = 11.sp, color = TextPrimary)
+                        Text("${(liveChatSettings.backgroundOpacity * 100).toInt()}%", fontSize = 11.sp, color = ViperCyan, fontWeight = FontWeight.Bold)
+                    }
+                    Slider(
+                        value = liveChatSettings.backgroundOpacity,
+                        onValueChange = { viewModel.updateLiveChatOpacity(it) },
+                        valueRange = 0.2f..1.0f,
+                        colors = SliderDefaults.colors(thumbColor = ViperCyan, activeTrackColor = ViperCyan)
+                    )
+                }
+
+                // Font Size Pills
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.spacedBy(8.dp),
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    Text("Font Size:", fontSize = 11.sp, color = TextPrimary)
+                    listOf(10 to "Small", 12 to "Standard", 14 to "Medium", 16 to "Large").forEach { (sz, label) ->
+                        val isSel = liveChatSettings.fontSizeSp == sz
+                        Box(
+                            modifier = Modifier
+                                .clip(RoundedCornerShape(6.dp))
+                                .background(if (isSel) ViperCyan else Color(0xFF131A28))
+                                .border(1.dp, if (isSel) ViperCyan else Color(0xFF263349), RoundedCornerShape(6.dp))
+                            .clickable { viewModel.updateLiveChatFontSize(sz) }
+                            .padding(horizontal = 8.dp, vertical = 4.dp)
+                        ) {
+                            Text(
+                                text = label,
+                                fontSize = 10.sp,
+                                fontWeight = if (isSel) FontWeight.Bold else FontWeight.Normal,
+                                color = if (isSel) Color.Black else TextPrimary
+                            )
+                        }
+                    }
                 }
             }
         }

@@ -141,4 +141,76 @@ class AppPreferencesRepository(context: Context) {
             apply()
         }
     }
+
+    // YouTube Channel Info Persistence
+    fun loadYouTubeChannelInfo(): com.example.data.model.YouTubeChannelInfo {
+        return com.example.data.model.YouTubeChannelInfo(
+            isConnected = prefs.getBoolean("yt_is_connected", false),
+            channelId = prefs.getString("yt_channel_id", "") ?: "",
+            channelTitle = prefs.getString("yt_channel_title", "VIPER GAMING LIVE") ?: "VIPER GAMING LIVE",
+            channelHandle = prefs.getString("yt_channel_handle", "@viper_official") ?: "@viper_official",
+            subscriberCountText = prefs.getString("yt_sub_count", "124K Subscribers") ?: "124K Subscribers",
+            avatarUrl = prefs.getString("yt_avatar_url", "") ?: "",
+            bannerUrl = prefs.getString("yt_banner_url", "") ?: "",
+            activeBroadcastTitle = prefs.getString("yt_broadcast_title", "BGMI Pro Championship Stream") ?: "BGMI Pro Championship Stream",
+            activeBroadcastId = prefs.getString("yt_broadcast_id", "") ?: "",
+            activeLiveChatId = prefs.getString("yt_chat_id", "") ?: "",
+            streamKey = prefs.getString("yt_stream_key", "") ?: "",
+            rtmpIngestUrl = prefs.getString("yt_ingest_url", "rtmp://a.rtmp.youtube.com/live2") ?: "rtmp://a.rtmp.youtube.com/live2",
+            lastSyncTimeMs = prefs.getLong("yt_last_sync", 0L)
+        )
+    }
+
+    fun saveYouTubeChannelInfo(info: com.example.data.model.YouTubeChannelInfo) {
+        prefs.edit().apply {
+            putBoolean("yt_is_connected", info.isConnected)
+            putString("yt_channel_id", info.channelId)
+            putString("yt_channel_title", info.channelTitle)
+            putString("yt_channel_handle", info.channelHandle)
+            putString("yt_sub_count", info.subscriberCountText)
+            putString("yt_avatar_url", info.avatarUrl)
+            putString("yt_banner_url", info.bannerUrl)
+            putString("yt_broadcast_title", info.activeBroadcastTitle)
+            putString("yt_broadcast_id", info.activeBroadcastId)
+            putString("yt_chat_id", info.activeLiveChatId)
+            putString("yt_stream_key", info.streamKey)
+            putString("yt_ingest_url", info.rtmpIngestUrl)
+            putLong("yt_last_sync", info.lastSyncTimeMs)
+            apply()
+        }
+    }
+
+    // Live Chat Settings Persistence
+    fun loadLiveChatSettings(): com.example.data.model.LiveChatSettings {
+        return com.example.data.model.LiveChatSettings(
+            isOverlayEnabled = prefs.getBoolean("chat_overlay_enabled", true),
+            isDraggable = prefs.getBoolean("chat_draggable", true),
+            backgroundOpacity = prefs.getFloat("chat_bg_opacity", 0.65f),
+            fontSizeSp = prefs.getInt("chat_font_size", 12),
+            showBadges = prefs.getBoolean("chat_show_badges", true),
+            maxMessages = prefs.getInt("chat_max_msgs", 8),
+            xPct = prefs.getFloat("chat_x_pct", 5f),
+            yPct = prefs.getFloat("chat_y_pct", 45f),
+            widthPct = prefs.getFloat("chat_width_pct", 55f),
+            heightPct = prefs.getFloat("chat_height_pct", 35f),
+            isLocked = prefs.getBoolean("chat_is_locked", false)
+        )
+    }
+
+    fun saveLiveChatSettings(settings: com.example.data.model.LiveChatSettings) {
+        prefs.edit().apply {
+            putBoolean("chat_overlay_enabled", settings.isOverlayEnabled)
+            putBoolean("chat_draggable", settings.isDraggable)
+            putFloat("chat_bg_opacity", settings.backgroundOpacity)
+            putInt("chat_font_size", settings.fontSizeSp)
+            putBoolean("chat_show_badges", settings.showBadges)
+            putInt("chat_max_msgs", settings.maxMessages)
+            putFloat("chat_x_pct", settings.xPct)
+            putFloat("chat_y_pct", settings.yPct)
+            putFloat("chat_width_pct", settings.widthPct)
+            putFloat("chat_height_pct", settings.heightPct)
+            putBoolean("chat_is_locked", settings.isLocked)
+            apply()
+        }
+    }
 }

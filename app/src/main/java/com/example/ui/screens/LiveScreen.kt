@@ -23,19 +23,24 @@ import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.filled.AccountCircle
 import androidx.compose.material.icons.filled.Cameraswitch
 import androidx.compose.material.icons.filled.Chat
+import androidx.compose.material.icons.filled.CheckCircle
 import androidx.compose.material.icons.filled.ContentPaste
 import androidx.compose.material.icons.filled.Info
+import androidx.compose.material.icons.filled.Key
 import androidx.compose.material.icons.filled.PlayArrow
 import androidx.compose.material.icons.filled.ScreenRotation
 import androidx.compose.material.icons.filled.Stop
+import androidx.compose.material.icons.filled.Sync
 import androidx.compose.material.icons.filled.Visibility
 import androidx.compose.material.icons.filled.VisibilityOff
 import androidx.compose.material3.Button
 import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.Card
 import androidx.compose.material3.CardDefaults
+import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.OutlinedTextField
@@ -55,7 +60,9 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.platform.LocalClipboardManager
+import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.input.KeyboardType
@@ -63,6 +70,8 @@ import androidx.compose.ui.text.input.PasswordVisualTransformation
 import androidx.compose.ui.text.input.VisualTransformation
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import coil.compose.AsyncImage
+import coil.request.ImageRequest
 import com.example.data.model.FpsOption
 import com.example.data.model.PlatformType
 import com.example.data.model.ResolutionOption
@@ -93,8 +102,12 @@ fun LiveScreen(
     val activeAlert by viewModel.activeAlert.collectAsState()
     val chatMessages by viewModel.chatMessages.collectAsState()
     val isChatVisible by viewModel.isChatOverlayVisible.collectAsState()
-    val clipboardManager = LocalClipboardManager.current
+    val liveChatSettings by viewModel.liveChatSettings.collectAsState()
+    val youTubeChannelInfo by viewModel.youTubeChannelInfo.collectAsState()
+    val isYouTubeSyncing by viewModel.isYouTubeSyncing.collectAsState()
 
+    val clipboardManager = LocalClipboardManager.current
+    val context = LocalContext.current
     var isKeyVisible by remember { mutableStateOf(false) }
 
     Column(
@@ -209,6 +222,7 @@ fun LiveScreen(
                 LiveChatOverlay(
                     messages = chatMessages,
                     onSendMessage = { viewModel.sendChatMessage(it) },
+                    settings = liveChatSettings,
                     modifier = Modifier
                         .align(Alignment.BottomStart)
                         .padding(8.dp)
@@ -231,8 +245,8 @@ fun LiveScreen(
                 ) {
                     Icon(
                         imageVector = Icons.Default.Cameraswitch,
-                        contentDescription = "Toggle Cam",
-                        tint = if (isCameraActive) ViperGreen else Color.Gray,
+                        contentDescription = "Camera",
+                        tint = if (isCameraActive) ViperGreen else Color.White,
                         modifier = Modifier.size(16.dp)
                     )
                 }
@@ -245,8 +259,8 @@ fun LiveScreen(
                 ) {
                     Icon(
                         imageVector = Icons.Default.Chat,
-                        contentDescription = "Toggle Chat",
-                        tint = if (isChatVisible) ViperGreen else Color.Gray,
+                        contentDescription = "Chat",
+                        tint = if (isChatVisible) ViperCyan else Color.White,
                         modifier = Modifier.size(16.dp)
                     )
                 }
@@ -357,6 +371,143 @@ fun LiveScreen(
                 fontSize = 16.sp,
                 letterSpacing = 1.sp
             )
+        }
+
+        // YouTube Channel Connection & Auto Stream Key Card
+        Card(
+            modifier = Modifier.fillMaxWidth(),
+            colors = CardDefaults.cardColors(containerColor = ViperSurfaceCard),
+            shape = RoundedCornerShape(12.dp)
+        ) {
+            Column(modifier = Modifier.padding(14.dp), verticalArrangement = Arrangement.spacedBy(10.dp)) {
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.SpaceBetween,
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                        Icon(Icons.Default.AccountCircle, contentDescription = null, tint = Color(0xFFFF0000), modifier = Modifier.size(18.dp))
+                        Text(
+                            text = "YOUTUBE BROADCAST & CHANNEL SYNC",
+                            fontSize = 11.sp,
+                            fontWeight = FontWeight.Bold,
+                            color = TextSecondary
+                        )
+                    }
+
+                    if (youTubeChannelInfo.isConnected) {
+                        Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(4.dp)) {
+                            Icon(Icons.Default.CheckCircle, contentDescription = null, tint = ViperGreen, modifier = Modifier.size(13.dp))
+                            Text("LINKED", fontSize = 10.sp, fontWeight = FontWeight.Bold, color = ViperGreen)
+                        }
+                    }
+                }
+
+                if (!youTubeChannelInfo.isConnected) {
+                    Text(
+                        text = "Sign in with Google to link your YouTube channel, auto-retrieve your active stream key, and enable real-time chat sync.",
+                        fontSize = 11.sp,
+                        color = TextSecondary
+                    )
+
+                    Button(
+                        onClick = { viewModel.signInWithGoogle(context) },
+                        colors = ButtonDefaults.buttonColors(containerColor = Color(0xFFFF0000), contentColor = Color.White),
+                        shape = RoundedCornerShape(8.dp),
+                        modifier = Modifier.fillMaxWidth()
+                    ) {
+                        Icon(Icons.Default.Sync, contentDescription = null, modifier = Modifier.size(15.dp))
+                        Spacer(modifier = Modifier.width(6.dp))
+                        Text("Connect YouTube Channel (Google Sign-In)", fontSize = 11.sp, fontWeight = FontWeight.Bold)
+                    }
+                } else {
+                    Row(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .clip(RoundedCornerShape(8.dp))
+                            .background(Color(0xFF101726))
+                            .padding(8.dp),
+                        verticalAlignment = Alignment.CenterVertically,
+                        horizontalArrangement = Arrangement.spacedBy(8.dp)
+                    ) {
+                        if (youTubeChannelInfo.avatarUrl.isNotBlank()) {
+                            AsyncImage(
+                                model = ImageRequest.Builder(context)
+                                    .data(youTubeChannelInfo.avatarUrl)
+                                    .crossfade(true)
+                                    .build(),
+                                contentDescription = "Channel Avatar",
+                                contentScale = ContentScale.Crop,
+                                modifier = Modifier
+                                    .size(32.dp)
+                                    .clip(CircleShape)
+                            )
+                        } else {
+                            Box(
+                                modifier = Modifier
+                                    .size(32.dp)
+                                    .clip(CircleShape)
+                                    .background(Color(0xFF26334D)),
+                                contentAlignment = Alignment.Center
+                            ) {
+                                Text(
+                                    text = youTubeChannelInfo.channelTitle.take(1).uppercase(),
+                                    fontSize = 14.sp,
+                                    fontWeight = FontWeight.Bold,
+                                    color = ViperCyan
+                                )
+                            }
+                        }
+
+                        Column(modifier = Modifier.weight(1f)) {
+                            Text(
+                                text = youTubeChannelInfo.channelTitle,
+                                fontSize = 12.sp,
+                                fontWeight = FontWeight.Bold,
+                                color = TextPrimary
+                            )
+                            Text(
+                                text = "${youTubeChannelInfo.channelHandle} • ${youTubeChannelInfo.subscriberCountText}",
+                                fontSize = 10.sp,
+                                color = TextMuted
+                            )
+                        }
+                    }
+
+                    // Auto-Fill Stream Key and Sync buttons
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        horizontalArrangement = Arrangement.spacedBy(8.dp)
+                    ) {
+                        Button(
+                            onClick = { viewModel.applyYouTubeStreamKeyToConfig() },
+                            colors = ButtonDefaults.buttonColors(containerColor = ViperCyan, contentColor = Color.Black),
+                            shape = RoundedCornerShape(8.dp),
+                            modifier = Modifier.weight(1f)
+                        ) {
+                            Icon(Icons.Default.Key, contentDescription = null, modifier = Modifier.size(14.dp))
+                            Spacer(modifier = Modifier.width(4.dp))
+                            Text("Auto-Fill Key", fontSize = 11.sp, fontWeight = FontWeight.Bold)
+                        }
+
+                        Button(
+                            onClick = { viewModel.syncYouTubeBroadcast() },
+                            enabled = !isYouTubeSyncing,
+                            colors = ButtonDefaults.buttonColors(containerColor = Color(0xFF1B2436), contentColor = TextPrimary),
+                            shape = RoundedCornerShape(8.dp),
+                            modifier = Modifier.weight(1f)
+                        ) {
+                            if (isYouTubeSyncing) {
+                                CircularProgressIndicator(modifier = Modifier.size(12.dp), color = ViperGreen, strokeWidth = 2.dp)
+                            } else {
+                                Icon(Icons.Default.Sync, contentDescription = null, modifier = Modifier.size(14.dp), tint = ViperGreen)
+                            }
+                            Spacer(modifier = Modifier.width(4.dp))
+                            Text("Sync Broadcast", fontSize = 11.sp)
+                        }
+                    }
+                }
+            }
         }
 
         // Platform Selection Tabs

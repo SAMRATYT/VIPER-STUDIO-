@@ -1,0 +1,47 @@
+{
+  "project_info": {
+    "project_number": "227479609974",
+    "project_id": "viper-studio-608b1",
+    "storage_bucket": "viper-studio-608b1.firebasestorage.app"
+  },
+  "client": [
+    {
+      "client_info": {
+        "mobilesdk_app_id": "1:227479609974:android:d7e297750de23a527db557",
+        "android_client_info": {
+          "package_name": "com.aistudio.viperstudio.gxltqv"
+        }
+      },
+      "oauth_client": [
+        {
+          "client_id": "227479609974-0jvtifjr0dc88qgfqj622v2erc38u4gj.apps.googleusercontent.com",
+          "client_type": 1,
+          "android_info": {
+            "package_name": "com.aistudio.viperstudio.gxltqv",
+            "certificate_hash": "de1723213c1fcf784ec6a508c6ed2b29471da453"
+          }
+        },
+        {
+          "client_id": "227479609974-3m9hai28r18n12tkthp9qjmosc5cvn9c.apps.googleusercontent.com",
+          "client_type": 3
+        }
+      ],
+      "api_key": [
+        {
+          "current_key": "AIzaSyBAM4_1B_M4RT_dNyjbx-gjWi8EJx3DGqE"
+        }
+      ],
+      "services": {
+        "appinvite_service": {
+          "other_platform_oauth_client": [
+            {
+              "client_id": "227479609974-3m9hai28r18n12tkthp9qjmosc5cvn9c.apps.googleusercontent.com",
+              "client_type": 3
+            }
+          ]
+        }
+      }
+    }
+  ],
+  "configuration_version": "1"
+}

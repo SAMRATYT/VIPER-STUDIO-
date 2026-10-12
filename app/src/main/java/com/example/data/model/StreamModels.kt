@@ -112,6 +112,7 @@ data class SceneLayer(
     val widthPct: Float,   // 5..100%
     val heightPct: Float,
     val rotationDeg: Float = 0f,
+    val opacity: Float = 1.0f, // 0.0 to 1.0
     val isVisible: Boolean = true,
     val isLocked: Boolean = false,
     val zIndex: Int = 0,
@@ -119,7 +120,8 @@ data class SceneLayer(
     val textColorHex: String = "#00E676",
     val bgColorHex: String = "#B30F1722",
     val pipShape: String = "ROUNDED", // ROUNDED, CIRCLE, SQUARE
-    val isMarqueeScroll: Boolean = false
+    val isMarqueeScroll: Boolean = false,
+    val imageUrl: String = ""
 )
 
 data class ScenePreset(
@@ -127,6 +129,48 @@ data class ScenePreset(
     val name: String,
     val isDefault: Boolean = false,
     val layers: List<SceneLayer>
+)
+
+data class YouTubeChannelInfo(
+    val isConnected: Boolean = false,
+    val channelId: String = "",
+    val channelTitle: String = "VIPER GAMING LIVE",
+    val channelHandle: String = "@viper_official",
+    val subscriberCountText: String = "124K Subscribers",
+    val avatarUrl: String = "",
+    val bannerUrl: String = "",
+    val activeBroadcastTitle: String = "BGMI Pro Championship Stream",
+    val activeBroadcastId: String = "",
+    val activeLiveChatId: String = "",
+    val streamKey: String = "",
+    val rtmpIngestUrl: String = "rtmp://a.rtmp.youtube.com/live2",
+    val lastSyncTimeMs: Long = 0L
+)
+
+data class LiveChatSettings(
+    val isOverlayEnabled: Boolean = true,
+    val isDraggable: Boolean = true,
+    val backgroundOpacity: Float = 0.65f, // 0.0f (transparent) to 1.0f (solid)
+    val fontSizeSp: Int = 12,            // 10, 12, 14
+    val showBadges: Boolean = true,
+    val maxMessages: Int = 8,
+    val xPct: Float = 5f,                // Draggable canvas X position (0-100%)
+    val yPct: Float = 45f,               // Draggable canvas Y position (0-100%)
+    val widthPct: Float = 55f,
+    val heightPct: Float = 35f,
+    val isLocked: Boolean = false        // Locked prevents accidental dragging
+)
+
+data class ChatMessage(
+    val id: String = java.util.UUID.randomUUID().toString(),
+    val sender: String,
+    val text: String,
+    val avatarUrl: String = "",
+    val badgeColorHex: String = "#00E676",
+    val badgeText: String = "",
+    val isSuperChat: Boolean = false,
+    val amount: String = "",
+    val timestamp: Long = System.currentTimeMillis()
 )
 
 enum class AlertType(val title: String, val soundTone: String) {
