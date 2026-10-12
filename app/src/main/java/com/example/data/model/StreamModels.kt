@@ -48,6 +48,12 @@ data class StreamConfig(
     val isLandscape: Boolean = true
 )
 
+enum class AudioCaptureMode(val displayName: String, val shortLabel: String) {
+    INTERNAL_AND_MIC("Internal + Microphone (Game & Voice)", "Game + Mic"),
+    INTERNAL_ONLY("Internal Only (Game Audio Only)", "Game Only"),
+    MIC_ONLY("Microphone Only (Voice Only)", "Mic Only")
+}
+
 data class AudioMixConfig(
     val gameAudioVolume: Float = 1.0f, // 0.0 to 2.0 (200% boost)
     val micAudioVolume: Float = 1.2f,  // 0.0 to 2.0 (200% boost)
@@ -55,7 +61,8 @@ data class AudioMixConfig(
     val isNoiseSuppressionEnabled: Boolean = true,
     val isEchoCancellationEnabled: Boolean = true,
     val audioDelayMs: Int = 0,         // -500ms to +500ms sync delay
-    val sampleRateHz: Int = 44100
+    val sampleRateHz: Int = 48000,
+    val audioCaptureMode: AudioCaptureMode = AudioCaptureMode.INTERNAL_AND_MIC
 )
 
 enum class NetworkHealth(val label: String, val hexColor: Long) {

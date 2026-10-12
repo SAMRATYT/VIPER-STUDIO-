@@ -42,6 +42,7 @@ import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import com.example.data.model.AudioCaptureMode
 import com.example.data.model.FpsOption
 import com.example.data.model.RateControlMode
 import com.example.data.model.ResolutionOption
@@ -221,6 +222,22 @@ fun SettingsScreen(
                         fontWeight = FontWeight.Bold,
                         color = ViperCyan
                     )
+                }
+
+                // Audio Capture Mode Selection
+                Column(verticalArrangement = Arrangement.spacedBy(4.dp)) {
+                    Text("Audio Capture Source Mode", fontSize = 11.sp, color = TextSecondary)
+                    Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                        AudioCaptureMode.values().forEach { mode ->
+                            val isSel = audioConfig.audioCaptureMode == mode
+                            SettingPill(
+                                label = mode.shortLabel,
+                                isSelected = isSel,
+                                onClick = { viewModel.setAudioCaptureMode(mode) },
+                                modifier = Modifier.weight(1f)
+                            )
+                        }
+                    }
                 }
 
                 // Audio Delay Offset (-500ms to +500ms)

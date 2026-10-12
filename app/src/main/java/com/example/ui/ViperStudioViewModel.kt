@@ -9,6 +9,7 @@ import com.example.data.local.entity.RecordingEntity
 import com.example.data.local.entity.SceneEntity
 import com.example.data.model.AlertEvent
 import com.example.data.model.AlertType
+import com.example.data.model.AudioCaptureMode
 import com.example.data.model.AudioMixConfig
 import com.example.data.model.FpsOption
 import com.example.data.model.LayerType
@@ -370,6 +371,7 @@ class ViperStudioViewModel(application: Application) : AndroidViewModel(applicat
     fun toggleNoiseSuppression() = audioEngine.toggleNoiseSuppression()
     fun toggleEchoCancellation() = audioEngine.toggleEchoCancellation()
     fun setAudioDelay(delayMs: Int) = audioEngine.setAudioDelay(delayMs)
+    fun setAudioCaptureMode(mode: AudioCaptureMode) = audioEngine.setAudioCaptureMode(mode)
 
     // Alert Actions
     fun triggerTestAlert(type: AlertType) {

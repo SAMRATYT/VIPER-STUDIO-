@@ -56,6 +56,7 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import com.example.data.model.AlertType
+import com.example.data.model.AudioCaptureMode
 import com.example.data.model.LayerType
 import com.example.ui.ViperStudioViewModel
 import com.example.ui.components.AlertOverlay
@@ -301,6 +302,22 @@ fun StudioScreen(
                             contentDescription = "Mute",
                             tint = if (audioConfig.isMicMuted) Color(0xFFFF5252) else ViperGreen,
                             modifier = Modifier.size(16.dp)
+                        )
+                    }
+                }
+
+                // Audio Capture Mode Pills (Internal + Mic, Internal Only, Mic Only)
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.spacedBy(6.dp)
+                ) {
+                    AudioCaptureMode.values().forEach { mode ->
+                        val isSel = audioConfig.audioCaptureMode == mode
+                        QuickHudPill(
+                            label = mode.shortLabel,
+                            isActive = isSel,
+                            onClick = { viewModel.setAudioCaptureMode(mode) },
+                            modifier = Modifier.weight(1f)
                         )
                     }
                 }

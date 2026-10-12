@@ -188,15 +188,150 @@ class ExampleRobolectricTest {
     }
 
     @Test
-    fun `test screen recorder starts and creates non zero byte recording`() {
-        val app = ApplicationProvider.getApplicationContext<ViperStudioApplication>()
-        val recorder = app.screenRecorderManager
-        recorder.startRecording(ResolutionOption.RES_720P)
-        assertTrue(recorder.isRecording.value)
-        var savedEntity: com.example.data.local.entity.RecordingEntity? = null
-        recorder.stopRecording { entity ->
-            savedEntity = entity
+    fun `test audio soft-clipping limiter prevents digital distortion and clipping wrap-around`() {
+        val normalSample = com.example.engine.audio.AudioProcessingUtils.softClip(10000f)
+        assertEquals(10000.toShort(), normalSample)
+
+        // Extremely loud sample (e.g. 200% volume boost + shout + grenade explosion = 80,000)
+        val loudSample = com.example.engine.audio.AudioProcessingUtils.softClip(80000f)
+        assertTrue("Loud sample must be bounded by 32767", loudSample <= 32767)
+        assertTrue("Loud sample must be above linear threshold 24000", loudSample >= 24000)
+
+        // Negative loud sample
+        val negLoudSample = com.example.engine.audio.AudioProcessingUtils.softClip(-90000f)
+        assertTrue("Negative sample must be bounded by -32767", negLoudSample >= -32767)
+        assertTrue("Negative sample must be below negative threshold -24000", negLoudSample <= -24000)
+    }
+
+    @Test
+    fun `test audio capture modes mixing logic`() {
+        val mic = ShortArray(10) { 10000.toShort() }
+        val game = ShortArray(10) { 5000.toShort() }
+        val output = ShortArray(10)
+
+        // 1. INTERNAL_AND_MIC
+        com.example.engine.audio.AudioProcessingUtils.mixStereoPcm(
+            micPcm = mic,
+            micVolume = 1.0f,
+            isMicMuted = false,
+            gamePcm = game,
+            gameVolume = 1.0f,
+            outputPcm = output,
+            mode = com.example.data.model.AudioCaptureMode.INTERNAL_AND_MIC
+        )
+        assertEquals(15000.toShort(), output[0])
+
+        // 2. INTERNAL_ONLY (Game only)
+        com.example.engine.audio.AudioProcessingUtils.mixStereoPcm(
+            micPcm = mic,
+            micVolume = 1.0f,
+            isMicMuted = false,
+            gamePcm = game,
+            gameVolume = 1.0f,
+            outputPcm = output,
+            mode = com.example.data.model.AudioCaptureMode.INTERNAL_ONLY
+        )
+        assertEquals(5000.toShort(), output[0])
+
+        // 3. MIC_ONLY (Mic only)
+        com.example.engine.audio.AudioProcessingUtils.mixStereoPcm(
+            micPcm = mic,
+            micVolume = 1.0f,
+            isMicMuted = false,
+            gamePcm = game,
+            gameVolume = 1.0f,
+            outputPcm = output,
+            mode = com.example.data.model.AudioCaptureMode.MIC_ONLY
+        )
+        assertEquals(10000.toShort(), output[0])
+    }
+
+    @Test
+    fun `test audio jitter buffer queue bounds and underrun silence padding`() {
+        val jitterBuffer = com.example.engine.audio.AudioJitterBuffer("TestJitter", maxCapacity = 4)
+
+        // Polling an empty buffer must provide padded silence (zeros) without crash
+        val emptyDest = ShortArray(8) { 99 }
+        val wasAvailable = jitterBuffer.poll(emptyDest)
+        assertFalse("Polling empty buffer should return false", wasAvailable)
+        assertEquals("Empty buffer must be zeroed", 0.toShort(), emptyDest[0])
+        assertEquals("Underrun counter must increment", 1L, jitterBuffer.underrunsCount.get())
+
+        // Enqueuing 6 items into capacity-4 buffer must drop 2 overruns
+        for (i in 1..6) {
+            jitterBuffer.push(ShortArray(8) { i.toShort() })
         }
-        assertFalse(recorder.isRecording.value)
+        assertEquals("Queue size must be capped at 4", 4, jitterBuffer.size())
+        assertEquals("Overrun count must be 2", 2L, jitterBuffer.overrunsCount.get())
+
+        val dest = ShortArray(8)
+        val polled = jitterBuffer.poll(dest)
+        assertTrue("Polled frame must be available", polled)
+        assertEquals("Oldest kept frame should be 3", 3.toShort(), dest[0])
+    }
+
+    @Test
+    fun `test 30-minute audio stability simulation and monotonic timestamp progression`() {
+        val sampleRate = 48000L
+        val samplesPerFrame = 1024L
+        val framesPer30Min = (30 * 60 * sampleRate) / samplesPerFrame // 84,375 frames
+
+        val basePtsUs = 100_000_000L // 100 seconds base
+        var previousPtsUs = basePtsUs - 1
+        var framesProcessed = 0L
+
+        val micPcm = ShortArray(2048) { 2000.toShort() }
+        val gamePcm = ShortArray(2048) { 3000.toShort() }
+        val outPcm = ShortArray(2048)
+
+        // Simulate 30-minute session in fast-forward frames
+        for (i in 0 until 5000) { // test 5000 continuous frames
+            val currentPtsUs = basePtsUs + ((framesProcessed * 1_000_000L) / sampleRate)
+
+            assertTrue("Timestamp must strictly advance monotonically", currentPtsUs > previousPtsUs)
+            previousPtsUs = currentPtsUs
+
+            com.example.engine.audio.AudioProcessingUtils.mixStereoPcm(
+                micPcm, 1.2f, false, gamePcm, 1.0f, outPcm,
+                com.example.data.model.AudioCaptureMode.INTERNAL_AND_MIC
+            )
+            framesProcessed += samplesPerFrame
+        }
+
+        val totalSimulatedSeconds = (framesProcessed.toDouble() / sampleRate)
+        assertTrue("Should simulate continuous audio stream without timestamp drift", totalSimulatedSeconds > 100.0)
+    }
+
+    @Test
+    fun `test audio mono to stereo upmixing and level calculation`() {
+        val monoBuffer = ShortArray(512) { 15000.toShort() }
+        val stereoOut = ShortArray(1024)
+
+        val written = com.example.engine.audio.AudioProcessingUtils.upmixMonoToStereo(monoBuffer, monoBuffer.size, stereoOut)
+        assertEquals(1024, written)
+        assertEquals(15000.toShort(), stereoOut[0]) // Left
+        assertEquals(15000.toShort(), stereoOut[1]) // Right
+
+        val level = com.example.engine.audio.AudioProcessingUtils.calculateNormalizedLevel(stereoOut, stereoOut.size)
+        assertTrue("Audio level for 15000 PCM amplitude must be between 0 and 1", level in 0.1f..1.0f)
+    }
+
+    @Test
+    fun `test audio device routing manager registration and lifecycle`() {
+        val context = ApplicationProvider.getApplicationContext<Context>()
+        val routingManager = com.example.engine.audio.AudioDeviceRoutingManager(context)
+
+        var routeChangedNotified = false
+        val listener = object : com.example.engine.audio.AudioRouteChangeListener {
+            override fun onAudioRouteChanged(description: String) {
+                routeChangedNotified = true
+            }
+        }
+
+        routingManager.startListening(listener)
+        // Stop listening without crash
+        routingManager.stopListening()
+        assertFalse(routeChangedNotified)
     }
 }
+

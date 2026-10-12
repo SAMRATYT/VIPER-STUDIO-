@@ -9,7 +9,9 @@ import android.media.audiofx.AcousticEchoCanceler
 import android.media.audiofx.NoiseSuppressor
 import android.util.Log
 import androidx.core.content.ContextCompat
+import com.example.data.model.AudioCaptureMode
 import com.example.data.model.AudioMixConfig
+import com.example.engine.hardware.ScreenCaptureEncoder
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
@@ -19,9 +21,7 @@ import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
-import kotlin.math.log10
 import kotlin.math.max
-import kotlin.math.sqrt
 
 class AudioMixerEngine(private val context: Context) {
 
@@ -48,35 +48,62 @@ class AudioMixerEngine(private val context: Context) {
     fun updateConfig(newConfig: AudioMixConfig) {
         _config.value = newConfig
         applyAudioEffects(newConfig)
+        syncWithEncoder(newConfig)
     }
 
     fun setGameVolume(volume: Float) {
-        _config.value = _config.value.copy(gameAudioVolume = volume.coerceIn(0f, 2.0f))
+        val updated = _config.value.copy(gameAudioVolume = volume.coerceIn(0f, 2.0f))
+        _config.value = updated
+        syncWithEncoder(updated)
     }
 
     fun setMicVolume(volume: Float) {
-        _config.value = _config.value.copy(micAudioVolume = volume.coerceIn(0f, 2.0f))
+        val updated = _config.value.copy(micAudioVolume = volume.coerceIn(0f, 2.0f))
+        _config.value = updated
+        syncWithEncoder(updated)
     }
 
     fun toggleMicMute() {
         val current = _config.value.isMicMuted
-        _config.value = _config.value.copy(isMicMuted = !current)
+        val updated = _config.value.copy(isMicMuted = !current)
+        _config.value = updated
+        syncWithEncoder(updated)
     }
 
     fun toggleNoiseSuppression() {
         val current = _config.value.isNoiseSuppressionEnabled
-        _config.value = _config.value.copy(isNoiseSuppressionEnabled = !current)
-        applyAudioEffects(_config.value)
+        val updated = _config.value.copy(isNoiseSuppressionEnabled = !current)
+        _config.value = updated
+        applyAudioEffects(updated)
+        syncWithEncoder(updated)
     }
 
     fun toggleEchoCancellation() {
         val current = _config.value.isEchoCancellationEnabled
-        _config.value = _config.value.copy(isEchoCancellationEnabled = !current)
-        applyAudioEffects(_config.value)
+        val updated = _config.value.copy(isEchoCancellationEnabled = !current)
+        _config.value = updated
+        applyAudioEffects(updated)
+        syncWithEncoder(updated)
     }
 
     fun setAudioDelay(delayMs: Int) {
-        _config.value = _config.value.copy(audioDelayMs = delayMs.coerceIn(-500, 500))
+        val updated = _config.value.copy(audioDelayMs = delayMs.coerceIn(-500, 500))
+        _config.value = updated
+        syncWithEncoder(updated)
+    }
+
+    fun setAudioCaptureMode(mode: AudioCaptureMode) {
+        val updated = _config.value.copy(audioCaptureMode = mode)
+        _config.value = updated
+        syncWithEncoder(updated)
+    }
+
+    private fun syncWithEncoder(cfg: AudioMixConfig) {
+        try {
+            ScreenCaptureEncoder.getInstance(context).updateAudioConfig(cfg)
+        } catch (e: Exception) {
+            Log.w(TAG, "Sync with encoder error: ${e.message}")
+        }
     }
 
     fun startAudioMonitoring() {
@@ -85,7 +112,17 @@ class AudioMixerEngine(private val context: Context) {
         captureJob = scope.launch {
             val buffer = ShortArray(1024)
             while (isActive) {
-                // Dynamically check permission on each cycle so granting permission at runtime starts mic immediately
+                val encoder = ScreenCaptureEncoder.getInstance(context)
+
+                // If hardware screen capture is actively running, mirror live levels directly from hardware pipeline
+                if (encoder.liveMicLevel > 0f || encoder.liveGameLevel > 0f) {
+                    _micLevel.value = encoder.liveMicLevel
+                    _gameLevel.value = encoder.liveGameLevel
+                    delay(50)
+                    continue
+                }
+
+                // Otherwise, perform standalone preview monitoring
                 val hasPerm = ContextCompat.checkSelfPermission(
                     context,
                     android.Manifest.permission.RECORD_AUDIO
@@ -95,36 +132,30 @@ class AudioMixerEngine(private val context: Context) {
                     initAudioRecord()
                 }
 
-                var currentMicDb = 0f
+                var currentMicLevel = 0f
                 val cfg = _config.value
 
-                if (hasPerm && audioRecord != null && !cfg.isMicMuted && audioRecord?.recordingState == AudioRecord.RECORDSTATE_RECORDING) {
+                if (hasPerm && audioRecord != null && !cfg.isMicMuted &&
+                    cfg.audioCaptureMode != AudioCaptureMode.INTERNAL_ONLY &&
+                    audioRecord?.recordingState == AudioRecord.RECORDSTATE_RECORDING
+                ) {
                     try {
                         val read = audioRecord?.read(buffer, 0, buffer.size) ?: 0
                         if (read > 0) {
-                            var sumSq = 0.0
-                            for (i in 0 until read) {
-                                val scaled = (buffer[i] * cfg.micAudioVolume).coerceIn(-32768f, 32767f)
-                                sumSq += scaled * scaled
-                            }
-                            val rms = sqrt(sumSq / read)
-                            val db = if (rms > 1) 20 * log10(rms / 32767.0) else -60.0
-                            currentMicDb = ((db + 60.0) / 60.0).toFloat().coerceIn(0f, 1f)
+                            currentMicLevel = AudioProcessingUtils.calculateNormalizedLevel(buffer, read) * cfg.micAudioVolume
                         }
                     } catch (e: Exception) {
                         Log.w(TAG, "Audio record read error", e)
                     }
-                } else {
-                    currentMicDb = 0f
                 }
 
-                // Realistic internal game audio visualizer pulse according to game volume
-                val gameSim = if (cfg.gameAudioVolume > 0.05f) {
+                // Realistic internal game audio preview pulsation if game volume is active and mode includes internal audio
+                val gameSim = if (cfg.gameAudioVolume > 0.05f && cfg.audioCaptureMode != AudioCaptureMode.MIC_ONLY) {
                     val basePulse = (0.20f + (System.currentTimeMillis() % 1200) / 2400f) * cfg.gameAudioVolume
                     basePulse.coerceIn(0f, 1f)
                 } else 0f
 
-                _micLevel.value = currentMicDb
+                _micLevel.value = currentMicLevel.coerceIn(0f, 1f)
                 _gameLevel.value = gameSim
 
                 delay(60)
@@ -155,9 +186,9 @@ class AudioMixerEngine(private val context: Context) {
                 audioRecord = rec
                 applyAudioEffects(_config.value)
                 rec.startRecording()
-                Log.i(TAG, "AudioRecord successfully initialized and recording.")
+                Log.i(TAG, "AudioRecord monitoring successfully initialized.")
             } else {
-                Log.w(TAG, "AudioRecord failed to initialize (state != STATE_INITIALIZED)")
+                Log.w(TAG, "AudioRecord failed to initialize")
                 rec.release()
             }
         } catch (e: Exception) {

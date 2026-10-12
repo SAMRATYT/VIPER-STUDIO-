@@ -54,6 +54,7 @@ class RtmpStreamEngine(private val context: Context) {
 
     private var currentConfig: StreamConfig = StreamConfig()
     private var startTimeMs: Long = 0
+    private var firstSamplePtsUs: Long = -1L
     private var frameCounter: Long = 0
     private var droppedCounter: Long = 0
     private val totalBytesSent = AtomicLong(0)
@@ -97,7 +98,14 @@ class RtmpStreamEngine(private val context: Context) {
             val out = outputStream ?: return
             if (!_stats.value.isStreaming) return
 
-            val currentTs = (System.currentTimeMillis() - startTimeMs).toInt().coerceAtLeast(0)
+            val currentTs = if (bufferInfo.presentationTimeUs > 0) {
+                if (firstSamplePtsUs == -1L) {
+                    firstSamplePtsUs = bufferInfo.presentationTimeUs
+                }
+                ((bufferInfo.presentationTimeUs - firstSamplePtsUs).coerceAtLeast(0L) / 1000L).toInt()
+            } else {
+                (System.currentTimeMillis() - startTimeMs).toInt().coerceAtLeast(0)
+            }
             frameCounter++
 
             val flvPacket = packageRealH264Nalu(byteBuffer, bufferInfo, isKeyFrame, sps, pps)
@@ -145,12 +153,19 @@ class RtmpStreamEngine(private val context: Context) {
             val out = outputStream ?: return
             if (!_stats.value.isStreaming) return
 
-            val currentTs = (System.currentTimeMillis() - startTimeMs).toInt().coerceAtLeast(0)
+            val currentTs = if (bufferInfo.presentationTimeUs > 0) {
+                if (firstSamplePtsUs == -1L) {
+                    firstSamplePtsUs = bufferInfo.presentationTimeUs
+                }
+                ((bufferInfo.presentationTimeUs - firstSamplePtsUs).coerceAtLeast(0L) / 1000L).toInt()
+            } else {
+                (System.currentTimeMillis() - startTimeMs).toInt().coerceAtLeast(0)
+            }
             val aacSize = bufferInfo.size
             if (aacSize <= 0) return
 
             val packet = ByteArray(2 + aacSize)
-            packet[0] = 0xAF.toByte() // AAC 44.1kHz Stereo 16-bit
+            packet[0] = 0xAF.toByte() // AAC 48kHz / 44.1kHz Stereo 16-bit
             packet[1] = 0x01.toByte() // Raw AAC payload
 
             val dup = byteBuffer.duplicate()
@@ -207,6 +222,7 @@ class RtmpStreamEngine(private val context: Context) {
         isConnectingOrStreaming.set(true)
         currentConfig = config
         startTimeMs = System.currentTimeMillis()
+        firstSamplePtsUs = -1L
         frameCounter = 0
         droppedCounter = 0
         totalBytesSent.set(0)
