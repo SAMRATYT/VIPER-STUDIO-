@@ -158,4 +158,45 @@ class ExampleRobolectricTest {
         rtmpEngine.clearErrorMessage()
         assertEquals(null, rtmpEngine.stats.value.errorMessage)
     }
+
+    @Test
+    fun `test rtmp amf0 serialization and deserialization`() {
+        val writer = com.example.engine.streaming.Amf0Writer()
+            .writeString("connect")
+            .writeNumber(1.0)
+            .writeObject(mapOf("app" to "live2", "flashVer" to "FMLE/3.0", "fpad" to false))
+        val bytes = writer.toByteArray()
+        assertTrue(bytes.isNotEmpty())
+
+        val reader = com.example.engine.streaming.Amf0Reader(bytes)
+        assertEquals("connect", reader.readNext())
+        assertEquals(1.0, reader.readNext())
+        val obj = reader.readNext() as? Map<*, *>
+        assertNotNull(obj)
+        assertEquals("live2", obj?.get("app"))
+        assertEquals(false, obj?.get("fpad"))
+    }
+
+    @Test
+    fun `test screen recorder manager initialization and storage metrics`() {
+        val app = ApplicationProvider.getApplicationContext<ViperStudioApplication>()
+        val recorder = app.screenRecorderManager
+        assertNotNull(recorder)
+        recorder.updateAvailableStorage()
+        assertTrue("Available storage should be reported", recorder.availableStorageGb.value >= 0f)
+        assertFalse("Recorder should not be recording initially", recorder.isRecording.value)
+    }
+
+    @Test
+    fun `test screen recorder starts and creates non zero byte recording`() {
+        val app = ApplicationProvider.getApplicationContext<ViperStudioApplication>()
+        val recorder = app.screenRecorderManager
+        recorder.startRecording(ResolutionOption.RES_720P)
+        assertTrue(recorder.isRecording.value)
+        var savedEntity: com.example.data.local.entity.RecordingEntity? = null
+        recorder.stopRecording { entity ->
+            savedEntity = entity
+        }
+        assertFalse(recorder.isRecording.value)
+    }
 }

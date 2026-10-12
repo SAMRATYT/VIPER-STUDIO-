@@ -80,16 +80,25 @@ fun TelemetryBadgeBar(
                 verticalAlignment = Alignment.CenterVertically,
                 horizontalArrangement = Arrangement.spacedBy(6.dp)
             ) {
+                val (statusText, statusColor, isPulsing) = when {
+                    stats.isConnecting -> Triple("CONNECTING TO RTMP...", Color(0xFFFFD600), true)
+                    stats.networkHealth == com.example.data.model.NetworkHealth.RECONNECTING -> Triple("RECONNECTING...", Color(0xFFFF1744), true)
+                    stats.isStreaming -> Triple("LIVE BROADCAST", LiveRed, true)
+                    stats.errorMessage != null -> Triple("STREAM FAILED", Color(0xFFFF5252), false)
+                    stats.isRecording -> Triple("RECORDING (MP4)", Color(0xFFFF9100), true)
+                    else -> Triple("DISCONNECTED / READY", ViperGreen, false)
+                }
+
                 Box(
                     modifier = Modifier
                         .size(10.dp)
                         .clip(CircleShape)
-                        .background(if (stats.isStreaming) LiveRed else Color.Gray)
-                        .alpha(if (stats.isStreaming) pulseAlpha else 1f)
+                        .background(statusColor)
+                        .alpha(if (isPulsing) pulseAlpha else 1f)
                 )
                 Text(
-                    text = if (stats.isStreaming) "LIVE BROADCAST" else if (stats.isRecording) "RECORDING" else "STUDIO READY",
-                    color = if (stats.isStreaming) LiveRed else if (stats.isRecording) Color(0xFFFF9100) else ViperGreen,
+                    text = statusText,
+                    color = statusColor,
                     fontWeight = FontWeight.Black,
                     fontSize = 11.sp,
                     letterSpacing = 1.sp

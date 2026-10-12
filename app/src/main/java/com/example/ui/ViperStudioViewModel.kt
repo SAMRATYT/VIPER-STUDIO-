@@ -77,6 +77,15 @@ class ViperStudioViewModel(application: Application) : AndroidViewModel(applicat
     val isRecording: StateFlow<Boolean> = recorderManager.isRecording
     val isRecordingPaused: StateFlow<Boolean> = recorderManager.isPaused
     val recordingDurationSec: StateFlow<Long> = recorderManager.durationSeconds
+    val estimatedRecordingSizeBytes: StateFlow<Long> = recorderManager.estimatedFileSizeBytes
+    val availableStorageGb: StateFlow<Float> = recorderManager.availableStorageGb
+
+    private val _lastSavedRecording = MutableStateFlow<RecordingItem?>(null)
+    val lastSavedRecording: StateFlow<RecordingItem?> = _lastSavedRecording.asStateFlow()
+
+    fun dismissSavedRecordingBanner() {
+        _lastSavedRecording.value = null
+    }
 
     val recordingsList: StateFlow<List<RecordingItem>> = db.recordingDao().getAllRecordings()
         .map { entities ->
@@ -483,7 +492,17 @@ class ViperStudioViewModel(application: Application) : AndroidViewModel(applicat
     }
 
     fun stopScreenRecording() {
-        recorderManager.stopRecording()
+        recorderManager.stopRecording { entity ->
+            _lastSavedRecording.value = RecordingItem(
+                id = entity.id,
+                title = entity.title,
+                filePath = entity.filePath,
+                durationSeconds = entity.durationSeconds,
+                fileSizeBytes = entity.fileSizeBytes,
+                resolution = entity.resolution,
+                timestamp = entity.timestamp
+            )
+        }
         if (!rtmpEngine.stats.value.isStreaming) {
             StreamForegroundService.stopService(app)
         }

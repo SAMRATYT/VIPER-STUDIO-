@@ -1,5 +1,7 @@
 <?xml version="1.0" encoding="utf-8"?>
 <paths xmlns:android="http://schemas.android.com/apk/res/android">
+    <external-path name="external_storage" path="." />
+    <external-path name="movies" path="Movies" />
     <external-files-path name="recordings" path="recordings" />
     <external-files-path name="all_external_files" path="." />
     <files-path name="internal_recordings" path="." />

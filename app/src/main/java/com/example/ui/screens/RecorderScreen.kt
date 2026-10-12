@@ -2,11 +2,15 @@ package com.example.ui.screens
 
 import android.content.Intent
 import android.net.Uri
+import android.widget.Toast
+import androidx.compose.animation.AnimatedVisibility
 import androidx.compose.animation.core.RepeatMode
 import androidx.compose.animation.core.animateFloat
 import androidx.compose.animation.core.infiniteRepeatable
 import androidx.compose.animation.core.rememberInfiniteTransition
 import androidx.compose.animation.core.tween
+import androidx.compose.animation.fadeIn
+import androidx.compose.animation.fadeOut
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
@@ -28,13 +32,16 @@ import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.filled.CheckCircle
+import androidx.compose.material.icons.filled.Close
 import androidx.compose.material.icons.filled.Delete
 import androidx.compose.material.icons.filled.FiberManualRecord
+import androidx.compose.material.icons.filled.Folder
 import androidx.compose.material.icons.filled.Pause
 import androidx.compose.material.icons.filled.PlayArrow
+import androidx.compose.material.icons.filled.SdCard
 import androidx.compose.material.icons.filled.Share
 import androidx.compose.material.icons.filled.Stop
-import androidx.compose.material.icons.filled.Timer
 import androidx.compose.material.icons.filled.VideoLibrary
 import androidx.compose.material.icons.filled.Videocam
 import androidx.compose.material3.Button
@@ -43,6 +50,7 @@ import androidx.compose.material3.Card
 import androidx.compose.material3.CardDefaults
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
+import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.collectAsState
@@ -85,6 +93,9 @@ fun RecorderScreen(
     val isRecording by viewModel.isRecording.collectAsState()
     val isPaused by viewModel.isRecordingPaused.collectAsState()
     val durationSec by viewModel.recordingDurationSec.collectAsState()
+    val estimatedSizeBytes by viewModel.estimatedRecordingSizeBytes.collectAsState()
+    val availableStorageGb by viewModel.availableStorageGb.collectAsState()
+    val lastSavedRecording by viewModel.lastSavedRecording.collectAsState()
     val streamConfig by viewModel.streamConfig.collectAsState()
     val recordings by viewModel.recordingsList.collectAsState()
     val context = LocalContext.current
@@ -107,6 +118,99 @@ fun RecorderScreen(
             .padding(16.dp),
         verticalArrangement = Arrangement.spacedBy(16.dp)
     ) {
+        // Saved Confirmation Banner (Movies/VIPER STUDIO)
+        AnimatedVisibility(
+            visible = lastSavedRecording != null,
+            enter = fadeIn(),
+            exit = fadeOut()
+        ) {
+            lastSavedRecording?.let { savedItem ->
+                Card(
+                    modifier = Modifier.fillMaxWidth(),
+                    colors = CardDefaults.cardColors(containerColor = Color(0xFF0F2B1E)),
+                    border = androidx.compose.foundation.BorderStroke(1.dp, ViperGreen),
+                    shape = RoundedCornerShape(12.dp)
+                ) {
+                    Column(
+                        modifier = Modifier.padding(14.dp),
+                        verticalArrangement = Arrangement.spacedBy(8.dp)
+                    ) {
+                        Row(
+                            modifier = Modifier.fillMaxWidth(),
+                            horizontalArrangement = Arrangement.SpaceBetween,
+                            verticalAlignment = Alignment.CenterVertically
+                        ) {
+                            Row(
+                                verticalAlignment = Alignment.CenterVertically,
+                                horizontalArrangement = Arrangement.spacedBy(8.dp)
+                            ) {
+                                Icon(Icons.Default.CheckCircle, contentDescription = null, tint = ViperGreen, modifier = Modifier.size(20.dp))
+                                Text(
+                                    text = "RECORDING SAVED TO MOVIES/VIPER STUDIO",
+                                    fontSize = 11.sp,
+                                    fontWeight = FontWeight.Black,
+                                    color = ViperGreen,
+                                    letterSpacing = 1.sp
+                                )
+                            }
+                            IconButton(
+                                onClick = { viewModel.dismissSavedRecordingBanner() },
+                                modifier = Modifier.size(24.dp)
+                            ) {
+                                Icon(Icons.Default.Close, contentDescription = "Close", tint = TextMuted, modifier = Modifier.size(16.dp))
+                            }
+                        }
+
+                        Text(
+                            text = savedItem.filePath,
+                            fontSize = 12.sp,
+                            fontWeight = FontWeight.SemiBold,
+                            color = TextPrimary
+                        )
+
+                        Row(
+                            modifier = Modifier.fillMaxWidth(),
+                            horizontalArrangement = Arrangement.SpaceBetween,
+                            verticalAlignment = Alignment.CenterVertically
+                        ) {
+                            Text(
+                                text = "${savedItem.durationSeconds}s • ${String.format(Locale.getDefault(), "%.1f", savedItem.fileSizeBytes / (1024.0 * 1024.0))} MB • ${savedItem.resolution}",
+                                fontSize = 11.sp,
+                                color = TextSecondary
+                            )
+
+                            Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                                Button(
+                                    onClick = {
+                                        playRecordingFile(context, savedItem.filePath)
+                                    },
+                                    colors = ButtonDefaults.buttonColors(containerColor = ViperGreen, contentColor = Color.Black),
+                                    shape = RoundedCornerShape(8.dp),
+                                    modifier = Modifier.height(34.dp)
+                                ) {
+                                    Icon(Icons.Default.PlayArrow, contentDescription = null, modifier = Modifier.size(16.dp))
+                                    Spacer(modifier = Modifier.width(4.dp))
+                                    Text("PLAY", fontWeight = FontWeight.Bold, fontSize = 11.sp)
+                                }
+
+                                OutlinedButton(
+                                    onClick = {
+                                        shareRecordingFile(context, savedItem.filePath)
+                                    },
+                                    shape = RoundedCornerShape(8.dp),
+                                    modifier = Modifier.height(34.dp)
+                                ) {
+                                    Icon(Icons.Default.Share, contentDescription = null, tint = ViperCyan, modifier = Modifier.size(14.dp))
+                                    Spacer(modifier = Modifier.width(4.dp))
+                                    Text("SHARE", color = ViperCyan, fontWeight = FontWeight.Bold, fontSize = 11.sp)
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
         // Hero Recording Control Box
         Card(
             modifier = Modifier.fillMaxWidth(),
@@ -157,11 +261,48 @@ fun RecorderScreen(
                     color = TextPrimary
                 )
 
-                Text(
-                    text = "Mixing: Game Audio (Stereo) + Mic Voice (Noise Suppressed)",
-                    fontSize = 11.sp,
-                    color = TextMuted
-                )
+                // Storage and Size Indicators
+                Row(
+                    horizontalArrangement = Arrangement.spacedBy(16.dp),
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(4.dp)) {
+                        Icon(Icons.Default.SdCard, contentDescription = null, tint = ViperCyan, modifier = Modifier.size(14.dp))
+                        Text(
+                            text = "${String.format(Locale.getDefault(), "%.1f", availableStorageGb)} GB Free",
+                            fontSize = 11.sp,
+                            color = TextSecondary
+                        )
+                    }
+
+                    if (isRecording) {
+                        Text(
+                            text = "•",
+                            fontSize = 12.sp,
+                            color = TextMuted
+                        )
+                        Text(
+                            text = "Size: ${String.format(Locale.getDefault(), "%.1f", estimatedSizeBytes / (1024.0 * 1024.0))} MB",
+                            fontSize = 11.sp,
+                            fontWeight = FontWeight.Bold,
+                            color = ViperGreen
+                        )
+                    }
+
+                    Text(
+                        text = "•",
+                        fontSize = 12.sp,
+                        color = TextMuted
+                    )
+                    Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(4.dp)) {
+                        Icon(Icons.Default.Folder, contentDescription = null, tint = TextMuted, modifier = Modifier.size(14.dp))
+                        Text(
+                            text = "Movies/VIPER STUDIO",
+                            fontSize = 11.sp,
+                            color = TextMuted
+                        )
+                    }
+                }
 
                 // Main Recorder Buttons
                 Row(
@@ -197,7 +338,7 @@ fun RecorderScreen(
                             Text(if (isPaused) "RESUME" else "PAUSE", fontWeight = FontWeight.Bold, fontSize = 12.sp)
                         }
 
-                        // Stop
+                        // Stop & Save
                         Button(
                             onClick = { viewModel.stopScreenRecording() },
                             modifier = Modifier.weight(1f).height(48.dp),
@@ -314,7 +455,7 @@ fun RecorderScreen(
                         fontWeight = FontWeight.Medium
                     )
                     Text(
-                        text = "Tap 'START RECORDING' to capture your mobile gameplay with internal audio.",
+                        text = "Tap 'START RECORDING' to capture your mobile gameplay with internal audio to Movies/VIPER STUDIO.",
                         color = TextMuted,
                         fontSize = 11.sp,
                         modifier = Modifier.padding(horizontal = 24.dp),
@@ -332,36 +473,54 @@ fun RecorderScreen(
                 items(recordings, key = { it.id }) { item ->
                     RecordingCardItem(
                         item = item,
-                        onPlay = {
-                            try {
-                                val file = File(item.filePath)
-                                val uri = FileProvider.getUriForFile(context, "${context.packageName}.provider", file)
-                                val intent = Intent(Intent.ACTION_VIEW).apply {
-                                    setDataAndType(uri, "video/mp4")
-                                    addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
-                                }
-                                context.startActivity(intent)
-                            } catch (_: Exception) {
-                                // Fallback
-                            }
-                        },
-                        onShare = {
-                            try {
-                                val file = File(item.filePath)
-                                val uri = FileProvider.getUriForFile(context, "${context.packageName}.provider", file)
-                                val shareIntent = Intent(Intent.ACTION_SEND).apply {
-                                    type = "video/mp4"
-                                    putExtra(Intent.EXTRA_STREAM, uri)
-                                    addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
-                                }
-                                context.startActivity(Intent.createChooser(shareIntent, "Share MP4 Recording"))
-                            } catch (_: Exception) {}
-                        },
+                        onPlay = { playRecordingFile(context, item.filePath) },
+                        onShare = { shareRecordingFile(context, item.filePath) },
                         onDelete = { viewModel.deleteRecording(item) }
                     )
                 }
             }
         }
+    }
+}
+
+private fun playRecordingFile(context: android.content.Context, filePath: String) {
+    try {
+        val file = File(filePath)
+        val uri = if (file.exists()) {
+            try {
+                FileProvider.getUriForFile(context, "${context.packageName}.provider", file)
+            } catch (_: Exception) {
+                Uri.fromFile(file)
+            }
+        } else {
+            Uri.parse(filePath)
+        }
+        val intent = Intent(Intent.ACTION_VIEW).apply {
+            setDataAndType(uri, "video/mp4")
+            addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION or Intent.FLAG_ACTIVITY_NEW_TASK)
+        }
+        context.startActivity(intent)
+    } catch (e: Exception) {
+        Toast.makeText(context, "Could not open video player: ${e.message}", Toast.LENGTH_SHORT).show()
+    }
+}
+
+private fun shareRecordingFile(context: android.content.Context, filePath: String) {
+    try {
+        val file = File(filePath)
+        val uri = try {
+            FileProvider.getUriForFile(context, "${context.packageName}.provider", file)
+        } catch (_: Exception) {
+            Uri.fromFile(file)
+        }
+        val shareIntent = Intent(Intent.ACTION_SEND).apply {
+            type = "video/mp4"
+            putExtra(Intent.EXTRA_STREAM, uri)
+            addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION or Intent.FLAG_ACTIVITY_NEW_TASK)
+        }
+        context.startActivity(Intent.createChooser(shareIntent, "Share MP4 Recording"))
+    } catch (e: Exception) {
+        Toast.makeText(context, "Could not share video: ${e.message}", Toast.LENGTH_SHORT).show()
     }
 }
 
@@ -373,7 +532,9 @@ private fun RecordingCardItem(
     onDelete: () -> Unit
 ) {
     Card(
-        modifier = Modifier.fillMaxWidth(),
+        modifier = Modifier
+            .fillMaxWidth()
+            .clickable { onPlay() },
         colors = CardDefaults.cardColors(containerColor = ViperSurfaceCard),
         shape = RoundedCornerShape(10.dp)
     ) {
@@ -393,14 +554,15 @@ private fun RecordingCardItem(
                     modifier = Modifier
                         .size(40.dp)
                         .clip(RoundedCornerShape(8.dp))
-                        .background(Color(0xFF162030)),
+                        .background(Color(0xFF162030))
+                        .clickable { onPlay() },
                     contentAlignment = Alignment.Center
                 ) {
                     Icon(
-                        imageVector = Icons.Default.VideoLibrary,
-                        contentDescription = null,
-                        tint = ViperCyan,
-                        modifier = Modifier.size(20.dp)
+                        imageVector = Icons.Default.PlayArrow,
+                        contentDescription = "Play",
+                        tint = ViperGreen,
+                        modifier = Modifier.size(24.dp)
                     )
                 }
 
@@ -418,14 +580,17 @@ private fun RecordingCardItem(
                         color = TextSecondary
                     )
                     Text(
-                        text = "${String.format(Locale.getDefault(), "%.1f", item.fileSizeBytes / (1024.0 * 1024.0))} MB",
+                        text = "${String.format(Locale.getDefault(), "%.1f", item.fileSizeBytes / (1024.0 * 1024.0))} MB • Movies/VIPER STUDIO",
                         fontSize = 10.sp,
                         color = TextMuted
                     )
                 }
             }
 
-            Row(verticalAlignment = Alignment.CenterVertically) {
+            Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(4.dp)) {
+                IconButton(onClick = onPlay, modifier = Modifier.size(32.dp)) {
+                    Icon(Icons.Default.PlayArrow, contentDescription = "Play", tint = ViperGreen, modifier = Modifier.size(18.dp))
+                }
                 IconButton(onClick = onShare, modifier = Modifier.size(32.dp)) {
                     Icon(Icons.Default.Share, contentDescription = "Share", tint = ViperCyan, modifier = Modifier.size(16.dp))
                 }
