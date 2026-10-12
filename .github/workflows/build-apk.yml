@@ -1,0 +1,186 @@
+name: Build and Publish Debug APK
+
+on:
+  push:
+    branches:
+      - main
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    name: Build & Release Debug APK
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Temurin Java 17
+        uses: actions/setup-java@v4
+        with:
+          distribution: 'temurin'
+          java-version: '17'
+
+      - name: Verify Java environment
+        run: |
+          echo "=== Java Version ==="
+          java -version
+          echo "=== JAVA_HOME ==="
+          echo "JAVA_HOME is: ${JAVA_HOME}"
+          if [ -z "${JAVA_HOME}" ]; then
+            echo "ERROR: JAVA_HOME is not set."
+            exit 1
+          fi
+
+          JAVA_RAW_VERSION=$(java -version 2>&1 | awk -F '"' '/version/ {print $2}')
+          echo "Detected raw Java version: ${JAVA_RAW_VERSION}"
+          if [ -z "${JAVA_RAW_VERSION}" ]; then
+            echo "ERROR: Failed to detect Java version."
+            exit 1
+          fi
+
+          JAVA_MAJOR=$(echo "${JAVA_RAW_VERSION}" | cut -d'.' -f1)
+          if [ "${JAVA_MAJOR}" = "1" ]; then
+            JAVA_MAJOR=$(echo "${JAVA_RAW_VERSION}" | cut -d'.' -f2)
+          fi
+
+          echo "Detected Java major version: ${JAVA_MAJOR}"
+          if ! [[ "${JAVA_MAJOR}" =~ ^[0-9]+$ ]]; then
+            echo "ERROR: Could not parse Java major version from '${JAVA_RAW_VERSION}'."
+            exit 1
+          fi
+
+          if [ "${JAVA_MAJOR}" -lt 17 ]; then
+            echo "ERROR: Active Java version (${JAVA_MAJOR}) is lower than 17."
+            exit 1
+          fi
+          echo "Java environment verified successfully (Java ${JAVA_MAJOR} >= 17)."
+
+      - name: Set up Gradle 9.3.1
+        uses: gradle/actions/setup-gradle@v4
+        with:
+          gradle-version: '9.3.1'
+
+      - name: Create temporary debug keystore
+        run: |
+          KEYSTORE_PATH="./debug.keystore"
+          if [ -f "${KEYSTORE_PATH}" ]; then
+            echo "Debug keystore already exists at ${KEYSTORE_PATH}. Skipping generation."
+          else
+            echo "Debug keystore missing. Generating temporary debug keystore..."
+            "${JAVA_HOME}/bin/keytool" -genkeypair -v \
+              -keystore "${KEYSTORE_PATH}" \
+              -storepass android \
+              -alias androiddebugkey \
+              -keypass android \
+              -keyalg RSA \
+              -keysize 2048 \
+              -validity 10000 \
+              -dname "CN=Android Debug,O=Android,C=US"
+          fi
+
+          if [ ! -f "${KEYSTORE_PATH}" ]; then
+            echo "ERROR: Keystore file ${KEYSTORE_PATH} was not found after generation attempt."
+            exit 1
+          fi
+          echo "Temporary debug keystore verified."
+
+      - name: Build the debug APK
+        run: |
+          gradle :app:assembleDebug --stacktrace --no-daemon
+
+      - name: Verify the APK
+        run: |
+          EXPECTED_APK="app/build/outputs/apk/debug/app-debug.apk"
+          if [ ! -f "${EXPECTED_APK}" ]; then
+            echo "ERROR: Expected debug APK not found at ${EXPECTED_APK}!"
+            echo "Searching exclusively in app/build/outputs/apk:"
+            if [ -d "app/build/outputs/apk" ]; then
+              find app/build/outputs/apk -type f -name "*.apk"
+            else
+              echo "Directory app/build/outputs/apk does not exist."
+            fi
+            exit 1
+          fi
+
+          if [ ! -f "${EXPECTED_APK}" ]; then
+            echo "ERROR: ${EXPECTED_APK} is not a regular file."
+            exit 1
+          fi
+
+          if [ ! -s "${EXPECTED_APK}" ]; then
+            echo "ERROR: ${EXPECTED_APK} is empty (0 bytes)."
+            exit 1
+          fi
+
+          case "${EXPECTED_APK}" in
+            *.apk) ;;
+            *)
+              echo "ERROR: File does not have .apk extension."
+              exit 1
+              ;;
+          esac
+
+          echo "APK successfully verified at ${EXPECTED_APK} ($(du -h "${EXPECTED_APK}" | cut -f1))."
+
+      - name: Upload debug APK artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: app-debug-apk
+          path: app/build/outputs/apk/debug/app-debug.apk
+          if-no-files-found: error
+
+      - name: Prepare APK release asset
+        id: prepare_asset
+        run: |
+          ASSET_DIR="${RUNNER_TEMP}/release-assets"
+          mkdir -p "${ASSET_DIR}"
+
+          RAW_REPO_NAME="${{ github.event.repository.name }}"
+          if [ -z "${RAW_REPO_NAME}" ]; then
+            RAW_REPO_NAME="viper-studio"
+          fi
+
+          # Sanitize repository name to safe filename characters
+          SAFE_REPO_NAME=$(echo "${RAW_REPO_NAME}" | tr -cd 'a-zA-Z0-9._-')
+          if [ -z "${SAFE_REPO_NAME}" ]; then
+            SAFE_REPO_NAME="viper-studio"
+          fi
+
+          RUN_NUM="${{ github.run_number }}"
+          TARGET_FILENAME="${SAFE_REPO_NAME}-debug-v${RUN_NUM}.apk"
+          TARGET_FILEPATH="${ASSET_DIR}/${TARGET_FILENAME}"
+
+          echo "Copying verified APK to temporary release asset path..."
+          cp "app/build/outputs/apk/debug/app-debug.apk" "${TARGET_FILEPATH}"
+
+          if [ ! -f "${TARGET_FILEPATH}" ] || [ ! -s "${TARGET_FILEPATH}" ]; then
+            echo "ERROR: Failed to prepare release asset at ${TARGET_FILEPATH}."
+            exit 1
+          fi
+
+          echo "Prepared release asset: ${TARGET_FILEPATH}"
+          echo "RELEASE_ASSET_PATH=${TARGET_FILEPATH}" >> "$GITHUB_ENV"
+          echo "RELEASE_ASSET_NAME=${TARGET_FILENAME}" >> "$GITHUB_ENV"
+
+      - name: Publish GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: "v${{ github.run_number }}"
+          name: "VIPER STUDIO Debug v${{ github.run_number }}"
+          body: |
+            ### VIPER STUDIO — Android Debug APK Build
+
+            - **Build Number**: `${{ github.run_number }}`
+            - **Commit**: `${{ github.sha }}`
+            - **Branch**: `${{ github.ref_name }}`
+
+            #### Direct Download
+            Download the attached `.apk` file below directly onto your Android device to install and test VIPER STUDIO.
+          files: ${{ env.RELEASE_ASSET_PATH }}
+          token: ${{ github.token }}
+          draft: false
+          prerelease: false

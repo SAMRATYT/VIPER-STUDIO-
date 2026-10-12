@@ -1,0 +1,38 @@
+<?xml version="1.0" encoding="utf-8"?>
+<vector xmlns:android="http://schemas.android.com/apk/res/android"
+    android:width="108dp"
+    android:height="108dp"
+    android:viewportWidth="108"
+    android:viewportHeight="108">
+    <group
+        android:translateX="0"
+        android:translateY="0">
+        <!-- Outer Broadcast Waves -->
+        <path
+            android:fillColor="#00E5FF"
+            android:pathData="M54,22 C36.33,22 22,36.33 22,54 C22,62.8 25.56,70.78 31.33,76.55 L35.57,72.31 C30.9,67.64 28,61.16 28,54 C28,39.64 39.64,28 54,28 C68.36,28 80,39.64 80,54 C80,61.16 77.1,67.64 72.43,72.31 L76.67,76.55 C82.44,70.78 86,62.8 86,54 C86,36.33 71.67,22 54,22 Z" />
+        
+        <!-- Mid Broadcast Arc -->
+        <path
+            android:fillColor="#00E676"
+            android:pathData="M54,34 C42.95,34 34,42.95 34,54 C34,59.5 36.24,64.5 39.85,68.1 L44.09,63.86 C41.58,61.35 40,57.86 40,54 C40,46.27 46.27,40 54,40 C61.73,40 68,46.27 68,54 C68,57.86 66.42,61.35 63.91,63.86 L68.15,68.1 C71.76,64.5 74,59.5 74,54 C74,42.95 65.05,34 54,34 Z" />
+
+        <!-- Viper "V" Studio Crest with Live Core -->
+        <path
+            android:fillColor="#00E676"
+            android:pathData="M42,46 L54,70 L66,46 L59,46 L54,58 L49,46 Z" />
+        
+        <!-- Live Center Pulse Dot -->
+        <path
+            android:fillColor="#FF1744"
+            android:pathData="M54,46 A4,4 0 1,0 54,38 A4,4 0 1,0 54,46 Z" />
+
+        <!-- Studio Base Wings / Audio Bars -->
+        <path
+            android:fillColor="#69F0AE"
+            android:pathData="M48,74 L60,74 L57,80 L51,80 Z" />
+        <path
+            android:fillColor="#00E5FF"
+            android:pathData="M43,82 L65,82 L62,86 L46,86 Z" />
+    </group>
+</vector>

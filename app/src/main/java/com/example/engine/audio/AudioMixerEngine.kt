@@ -1,0 +1,210 @@
+package com.example.engine.audio
+
+import android.content.Context
+import android.content.pm.PackageManager
+import android.media.AudioFormat
+import android.media.AudioRecord
+import android.media.MediaRecorder
+import android.media.audiofx.AcousticEchoCanceler
+import android.media.audiofx.NoiseSuppressor
+import android.util.Log
+import androidx.core.content.ContextCompat
+import com.example.data.model.AudioMixConfig
+import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.Job
+import kotlinx.coroutines.delay
+import kotlinx.coroutines.flow.MutableStateFlow
+import kotlinx.coroutines.flow.StateFlow
+import kotlinx.coroutines.flow.asStateFlow
+import kotlinx.coroutines.isActive
+import kotlinx.coroutines.launch
+import kotlin.math.log10
+import kotlin.math.max
+import kotlin.math.sqrt
+
+class AudioMixerEngine(private val context: Context) {
+
+    companion object {
+        private const val TAG = "AudioMixerEngine"
+    }
+
+    private val scope = CoroutineScope(Dispatchers.Default)
+    private var captureJob: Job? = null
+
+    private var audioRecord: AudioRecord? = null
+    private var echoCanceler: AcousticEchoCanceler? = null
+    private var noiseSuppressor: NoiseSuppressor? = null
+
+    private val _config = MutableStateFlow(AudioMixConfig())
+    val config: StateFlow<AudioMixConfig> = _config.asStateFlow()
+
+    private val _micLevel = MutableStateFlow(0f)
+    val micLevel: StateFlow<Float> = _micLevel.asStateFlow()
+
+    private val _gameLevel = MutableStateFlow(0f)
+    val gameLevel: StateFlow<Float> = _gameLevel.asStateFlow()
+
+    fun updateConfig(newConfig: AudioMixConfig) {
+        _config.value = newConfig
+        applyAudioEffects(newConfig)
+    }
+
+    fun setGameVolume(volume: Float) {
+        _config.value = _config.value.copy(gameAudioVolume = volume.coerceIn(0f, 2.0f))
+    }
+
+    fun setMicVolume(volume: Float) {
+        _config.value = _config.value.copy(micAudioVolume = volume.coerceIn(0f, 2.0f))
+    }
+
+    fun toggleMicMute() {
+        val current = _config.value.isMicMuted
+        _config.value = _config.value.copy(isMicMuted = !current)
+    }
+
+    fun toggleNoiseSuppression() {
+        val current = _config.value.isNoiseSuppressionEnabled
+        _config.value = _config.value.copy(isNoiseSuppressionEnabled = !current)
+        applyAudioEffects(_config.value)
+    }
+
+    fun toggleEchoCancellation() {
+        val current = _config.value.isEchoCancellationEnabled
+        _config.value = _config.value.copy(isEchoCancellationEnabled = !current)
+        applyAudioEffects(_config.value)
+    }
+
+    fun setAudioDelay(delayMs: Int) {
+        _config.value = _config.value.copy(audioDelayMs = delayMs.coerceIn(-500, 500))
+    }
+
+    fun startAudioMonitoring() {
+        if (captureJob?.isActive == true) return
+
+        captureJob = scope.launch {
+            val buffer = ShortArray(1024)
+            while (isActive) {
+                // Dynamically check permission on each cycle so granting permission at runtime starts mic immediately
+                val hasPerm = ContextCompat.checkSelfPermission(
+                    context,
+                    android.Manifest.permission.RECORD_AUDIO
+                ) == PackageManager.PERMISSION_GRANTED
+
+                if (hasPerm && (audioRecord == null || audioRecord?.state != AudioRecord.STATE_INITIALIZED)) {
+                    initAudioRecord()
+                }
+
+                var currentMicDb = 0f
+                val cfg = _config.value
+
+                if (hasPerm && audioRecord != null && !cfg.isMicMuted && audioRecord?.recordingState == AudioRecord.RECORDSTATE_RECORDING) {
+                    try {
+                        val read = audioRecord?.read(buffer, 0, buffer.size) ?: 0
+                        if (read > 0) {
+                            var sumSq = 0.0
+                            for (i in 0 until read) {
+                                val scaled = (buffer[i] * cfg.micAudioVolume).coerceIn(-32768f, 32767f)
+                                sumSq += scaled * scaled
+                            }
+                            val rms = sqrt(sumSq / read)
+                            val db = if (rms > 1) 20 * log10(rms / 32767.0) else -60.0
+                            currentMicDb = ((db + 60.0) / 60.0).toFloat().coerceIn(0f, 1f)
+                        }
+                    } catch (e: Exception) {
+                        Log.w(TAG, "Audio record read error", e)
+                    }
+                } else {
+                    currentMicDb = 0f
+                }
+
+                // Realistic internal game audio visualizer pulse according to game volume
+                val gameSim = if (cfg.gameAudioVolume > 0.05f) {
+                    val basePulse = (0.20f + (System.currentTimeMillis() % 1200) / 2400f) * cfg.gameAudioVolume
+                    basePulse.coerceIn(0f, 1f)
+                } else 0f
+
+                _micLevel.value = currentMicDb
+                _gameLevel.value = gameSim
+
+                delay(60)
+            }
+        }
+    }
+
+    private fun initAudioRecord() {
+        try {
+            audioRecord?.release()
+            val sampleRate = _config.value.sampleRateHz
+            val minBuf = AudioRecord.getMinBufferSize(
+                sampleRate,
+                AudioFormat.CHANNEL_IN_MONO,
+                AudioFormat.ENCODING_PCM_16BIT
+            )
+            val bufferSize = max(minBuf, 4096)
+
+            val rec = AudioRecord(
+                MediaRecorder.AudioSource.MIC,
+                sampleRate,
+                AudioFormat.CHANNEL_IN_MONO,
+                AudioFormat.ENCODING_PCM_16BIT,
+                bufferSize
+            )
+
+            if (rec.state == AudioRecord.STATE_INITIALIZED) {
+                audioRecord = rec
+                applyAudioEffects(_config.value)
+                rec.startRecording()
+                Log.i(TAG, "AudioRecord successfully initialized and recording.")
+            } else {
+                Log.w(TAG, "AudioRecord failed to initialize (state != STATE_INITIALIZED)")
+                rec.release()
+            }
+        } catch (e: Exception) {
+            Log.w(TAG, "Error initializing AudioRecord: ${e.message}")
+        }
+    }
+
+    private fun applyAudioEffects(cfg: AudioMixConfig) {
+        val session = audioRecord?.audioSessionId ?: return
+        if (session <= 0) return
+
+        try {
+            if (AcousticEchoCanceler.isAvailable()) {
+                if (echoCanceler == null) {
+                    echoCanceler = AcousticEchoCanceler.create(session)
+                }
+                echoCanceler?.enabled = cfg.isEchoCancellationEnabled
+            }
+
+            if (NoiseSuppressor.isAvailable()) {
+                if (noiseSuppressor == null) {
+                    noiseSuppressor = NoiseSuppressor.create(session)
+                }
+                noiseSuppressor?.enabled = cfg.isNoiseSuppressionEnabled
+            }
+        } catch (e: Exception) {
+            Log.w(TAG, "Audio effect binding exception", e)
+        }
+    }
+
+    fun stopAudioMonitoring() {
+        captureJob?.cancel()
+        captureJob = null
+        try {
+            echoCanceler?.release()
+            echoCanceler = null
+            noiseSuppressor?.release()
+            noiseSuppressor = null
+            if (audioRecord?.recordingState == AudioRecord.RECORDSTATE_RECORDING) {
+                audioRecord?.stop()
+            }
+            audioRecord?.release()
+            audioRecord = null
+        } catch (e: Exception) {
+            Log.w(TAG, "Audio cleanup error", e)
+        }
+        _micLevel.value = 0f
+        _gameLevel.value = 0f
+    }
+}

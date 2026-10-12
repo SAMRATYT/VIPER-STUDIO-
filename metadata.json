@@ -1,0 +1,8 @@
+{
+  "name": "VIPER STUDIO",
+  "description": "Professional live streaming and screen recording studio for mobile gaming, RTMP broadcast, scene editing, and audio mixing.",
+  "requestFramePermissions": [],
+  "majorCapabilities": [
+    "MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"
+  ]
+}
