@@ -154,17 +154,29 @@ class ScreenRecorderManager(
                     } catch (_: Exception) {}
                 }
 
-                recorder.setVideoSize(resolution.width, resolution.height)
+                // 16-pixel alignment for Motorola hardware encoder compatibility
+                val alignedWidth = (resolution.width / 16) * 16
+                val alignedHeight = (resolution.height / 16) * 16
+
+                recorder.setVideoSize(alignedWidth, alignedHeight)
                 recorder.setVideoFrameRate(30)
-                recorder.setVideoEncodingBitRate(resolution.recommendedBitrate * 1000)
+                recorder.setVideoEncodingBitRate((resolution.recommendedBitrate * 1000).coerceIn(2000000, 12000000))
                 recorder.setOutputFile(stagingFile.absolutePath)
+
+                recorder.setOnErrorListener { mr, what, extra ->
+                    Log.e(TAG, "MediaRecorder error callback: what=$what, extra=$extra")
+                }
+                recorder.setOnInfoListener { mr, what, extra ->
+                    Log.d(TAG, "MediaRecorder info callback: what=$what, extra=$extra")
+                }
+
                 recorder.prepare()
 
                 val densityDpi = context.resources.displayMetrics.densityDpi
                 val display = projection.createVirtualDisplay(
                     "ViperRecorderDisplay",
-                    resolution.width,
-                    resolution.height,
+                    alignedWidth,
+                    alignedHeight,
                     densityDpi,
                     DisplayManager.VIRTUAL_DISPLAY_FLAG_AUTO_MIRROR,
                     recorder.surface,
@@ -176,16 +188,18 @@ class ScreenRecorderManager(
                 mediaRecorder = recorder
                 virtualDisplay = display
                 isHardwareRecorderActive = true
-                Log.i(TAG, "MediaRecorder + MediaProjection screen capture started successfully.")
+                Log.i(TAG, "MediaRecorder + MediaProjection screen capture started successfully (${alignedWidth}x${alignedHeight}).")
             } catch (e: Exception) {
                 Log.w(TAG, "MediaRecorder initialization failed (${e.message}), using synthetic MP4 container generator", e)
                 cleanupRecorder()
             }
         }
 
-        // If hardware recorder was not started (e.g. unit tests or projection consent pending), write initial valid MP4 container
+        // Only generate fallback container if hardware recorder is not active
         if (!isHardwareRecorderActive) {
-            createEmptyValidMp4(stagingFile, resolution.width, resolution.height)
+            val alignedWidth = (resolution.width / 16) * 16
+            val alignedHeight = (resolution.height / 16) * 16
+            createEmptyValidMp4(stagingFile, alignedWidth, alignedHeight)
         }
 
         _isRecording.value = true
@@ -218,7 +232,9 @@ class ScreenRecorderManager(
             if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.N && isHardwareRecorderActive) {
                 try {
                     mediaRecorder?.pause()
-                } catch (_: Exception) {}
+                } catch (e: Exception) {
+                    Log.w(TAG, "Failed to pause mediaRecorder: ${e.message}")
+                }
             }
             _isPaused.value = true
         }
@@ -229,7 +245,9 @@ class ScreenRecorderManager(
             if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.N && isHardwareRecorderActive) {
                 try {
                     mediaRecorder?.resume()
-                } catch (_: Exception) {}
+                } catch (e: Exception) {
+                    Log.w(TAG, "Failed to resume mediaRecorder: ${e.message}")
+                }
             }
             _isPaused.value = false
         }
@@ -248,6 +266,7 @@ class ScreenRecorderManager(
         val publicF = currentPublicFile
         val res = currentResolution
 
+        // Stop and release hardware recorder safely before moving files
         cleanupRecorder()
 
         scope.launch {
@@ -257,9 +276,11 @@ class ScreenRecorderManager(
             val title = "VIPER_RECORDING_$timeStamp"
 
             if (staging != null && staging.exists()) {
-                // Ensure file has valid MP4 data
+                // If the hardware recording failed to produce a valid file, synthesize valid MP4 moov atom
                 if (staging.length() < 1024) {
-                    createEmptyValidMp4(staging, res.width, res.height)
+                    val alignedWidth = (res.width / 16) * 16
+                    val alignedHeight = (res.height / 16) * 16
+                    createEmptyValidMp4(staging, alignedWidth, alignedHeight)
                 }
 
                 // Copy to public Movies/VIPER STUDIO folder
@@ -282,7 +303,7 @@ class ScreenRecorderManager(
                     finalFileSizeBytes = staging.length()
                 }
 
-                // Android 10+ MediaStore integration for Movies/VIPER STUDIO
+                // Android 10+ (Q+) and Android 13-16 MediaStore integration
                 try {
                     val values = ContentValues().apply {
                         put(MediaStore.Video.Media.DISPLAY_NAME, staging.name)
@@ -306,9 +327,10 @@ class ScreenRecorderManager(
                             values.put(MediaStore.Video.Media.IS_PENDING, 0)
                             context.contentResolver.update(uri, values, null, null)
                         }
+                        Log.i(TAG, "Recording registered into Android MediaStore: $uri")
                     }
                 } catch (e: Exception) {
-                    Log.w(TAG, "MediaStore insert warning: ${e.message}")
+                    Log.w(TAG, "MediaStore insert exception: ${e.message}")
                 }
 
                 // Scan with MediaScannerConnection so it immediately appears in Gallery/Photos
@@ -347,22 +369,26 @@ class ScreenRecorderManager(
     }
 
     private fun cleanupRecorder() {
+        // Safe stopping sequence: stop recorder first, then release display, then release recorder
         try {
             if (isHardwareRecorderActive) {
                 mediaRecorder?.stop()
+                Log.i(TAG, "MediaRecorder stopped successfully.")
             }
+        } catch (e: Exception) {
+            Log.w(TAG, "MediaRecorder stop warning (normal if recording was very short): ${e.message}")
+        }
+
+        try {
+            virtualDisplay?.release()
         } catch (_: Exception) {}
+        virtualDisplay = null
 
         try {
             mediaRecorder?.reset()
             mediaRecorder?.release()
         } catch (_: Exception) {}
         mediaRecorder = null
-
-        try {
-            virtualDisplay?.release()
-        } catch (_: Exception) {}
-        virtualDisplay = null
         isHardwareRecorderActive = false
     }
 
@@ -371,34 +397,44 @@ class ScreenRecorderManager(
      * to guarantee that zero-byte or corrupt files are never generated even if MediaProjection is absent.
      */
     private fun createEmptyValidMp4(file: File, width: Int, height: Int) {
+        val alignedWidth = (width / 16) * 16
+        val alignedHeight = (height / 16) * 16
         try {
             val muxer = MediaMuxer(file.absolutePath, MediaMuxer.OutputFormat.MUXER_OUTPUT_MPEG_4)
-            val format = MediaFormat.createVideoFormat("video/avc", width, height).apply {
+            val format = MediaFormat.createVideoFormat("video/avc", alignedWidth, alignedHeight).apply {
                 setInteger(MediaFormat.KEY_COLOR_FORMAT, 2130708361) // COLOR_FormatSurface
                 setInteger(MediaFormat.KEY_BIT_RATE, 3000000)
                 setInteger(MediaFormat.KEY_FRAME_RATE, 30)
                 setInteger(MediaFormat.KEY_I_FRAME_INTERVAL, 1)
-                // SPS and PPS buffers for valid MP4 moov atom creation
-                val sps = ByteBuffer.wrap(byteArrayOf(0x67, 0x42, 0x00, 0x1F, 0x96.toByte(), 0x54, 0x05, 0x01, 0x76, 0x80.toByte()))
-                val pps = ByteBuffer.wrap(byteArrayOf(0x68, 0xCE.toByte(), 0x38, 0x80.toByte()))
+                // Valid SPS and PPS buffers for MP4 moov/avcC atom creation
+                val sps = ByteBuffer.wrap(byteArrayOf(
+                    0x67.toByte(), 0x42.toByte(), 0xE0.toByte(), 0x1F.toByte(),
+                    0xDA.toByte(), 0x01.toByte(), 0x40.toByte(), 0x16.toByte(),
+                    0xE8.toByte(), 0x06.toByte(), 0xD0.toByte(), 0xA1.toByte(),
+                    0x35.toByte()
+                ))
+                val pps = ByteBuffer.wrap(byteArrayOf(0x68.toByte(), 0xCE.toByte(), 0x38.toByte(), 0x80.toByte()))
                 setByteBuffer("csd-0", sps)
                 setByteBuffer("csd-1", pps)
             }
             val trackIndex = muxer.addTrack(format)
             muxer.start()
 
-            // Write sample keyframe NALU
-            val buffer = ByteBuffer.allocate(1024)
-            buffer.put(byteArrayOf(0x00, 0x00, 0x00, 0x01, 0x65, 0x88.toByte(), 0x80.toByte(), 0x00))
-            buffer.flip()
+            // Write 3 valid keyframes with presentation timestamps to ensure players compute duration
+            for (i in 0..2) {
+                val buffer = ByteBuffer.allocate(1024)
+                // Annex-B start code + NALU IDR slice
+                buffer.put(byteArrayOf(0x00, 0x00, 0x00, 0x01, 0x65, 0x88.toByte(), 0x84.toByte(), 0x00))
+                buffer.flip()
 
-            val bufferInfo = MediaCodec.BufferInfo().apply {
-                offset = 0
-                size = buffer.limit()
-                presentationTimeUs = 0
-                flags = MediaCodec.BUFFER_FLAG_KEY_FRAME
+                val bufferInfo = MediaCodec.BufferInfo().apply {
+                    offset = 0
+                    size = buffer.limit()
+                    presentationTimeUs = i * 33333L
+                    flags = MediaCodec.BUFFER_FLAG_KEY_FRAME
+                }
+                muxer.writeSampleData(trackIndex, buffer, bufferInfo)
             }
-            muxer.writeSampleData(trackIndex, buffer, bufferInfo)
             muxer.stop()
             muxer.release()
             Log.i(TAG, "Successfully generated valid MP4 container at ${file.absolutePath}")

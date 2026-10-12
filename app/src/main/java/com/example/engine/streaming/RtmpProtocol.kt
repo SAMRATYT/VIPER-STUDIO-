@@ -161,10 +161,25 @@ object RtmpProtocol {
         return buf.array()
     }
 
+    private var currentInChunkSize = DEFAULT_CHUNK_SIZE
+    private val channelHeaders = mutableMapOf<Int, RtmpHeaderState>()
+
+    data class RtmpHeaderState(
+        var timestamp: Int = 0,
+        var length: Int = 0,
+        var typeId: Int = 0,
+        var streamId: Int = 0
+    )
+
+    fun resetProtocolState() {
+        currentInChunkSize = DEFAULT_CHUNK_SIZE
+        channelHeaders.clear()
+    }
+
     /**
-     * Reads a single RTMP message from the stream.
+     * Reads a single complete RTMP message from the stream, tracking inbound chunk size and channel state.
      */
-    fun readMessage(inputStream: InputStream, inChunkSize: Int = DEFAULT_CHUNK_SIZE): RtmpMessage? {
+    fun readMessage(inputStream: InputStream): RtmpMessage? {
         val firstByte = inputStream.read()
         if (firstByte == -1) return null
 
@@ -172,65 +187,102 @@ object RtmpProtocol {
         var csid = firstByte and 0x3F
 
         if (csid == 0) {
-            csid = 64 + inputStream.read()
+            val b = inputStream.read()
+            if (b == -1) return null
+            csid = 64 + b
         } else if (csid == 1) {
             val b1 = inputStream.read()
             val b2 = inputStream.read()
+            if (b1 == -1 || b2 == -1) return null
             csid = 64 + b1 + (b2 shl 8)
         }
 
-        var timestamp = 0
-        var length = 0
-        var typeId = 0
-        var streamId = 0
+        val state = channelHeaders.getOrPut(csid) { RtmpHeaderState() }
 
         when (fmt) {
             0 -> {
-                timestamp = (inputStream.read() shl 16) or (inputStream.read() shl 8) or inputStream.read()
-                length = (inputStream.read() shl 16) or (inputStream.read() shl 8) or inputStream.read()
-                typeId = inputStream.read()
-                val b0 = inputStream.read()
-                val b1 = inputStream.read()
-                val b2 = inputStream.read()
-                val b3 = inputStream.read()
-                streamId = (b3 shl 24) or (b2 shl 16) or (b1 shl 8) or b0
+                val b0 = inputStream.read(); val b1 = inputStream.read(); val b2 = inputStream.read()
+                if (b0 == -1 || b1 == -1 || b2 == -1) return null
+                state.timestamp = (b0 shl 16) or (b1 shl 8) or b2
+
+                val l0 = inputStream.read(); val l1 = inputStream.read(); val l2 = inputStream.read()
+                if (l0 == -1 || l1 == -1 || l2 == -1) return null
+                state.length = (l0 shl 16) or (l1 shl 8) or l2
+
+                val t = inputStream.read()
+                if (t == -1) return null
+                state.typeId = t
+
+                val s0 = inputStream.read(); val s1 = inputStream.read(); val s2 = inputStream.read(); val s3 = inputStream.read()
+                if (s0 == -1 || s1 == -1 || s2 == -1 || s3 == -1) return null
+                state.streamId = (s3 shl 24) or (s2 shl 16) or (s1 shl 8) or s0
             }
             1 -> {
-                timestamp = (inputStream.read() shl 16) or (inputStream.read() shl 8) or inputStream.read()
-                length = (inputStream.read() shl 16) or (inputStream.read() shl 8) or inputStream.read()
-                typeId = inputStream.read()
+                val b0 = inputStream.read(); val b1 = inputStream.read(); val b2 = inputStream.read()
+                if (b0 == -1 || b1 == -1 || b2 == -1) return null
+                state.timestamp = (b0 shl 16) or (b1 shl 8) or b2
+
+                val l0 = inputStream.read(); val l1 = inputStream.read(); val l2 = inputStream.read()
+                if (l0 == -1 || l1 == -1 || l2 == -1) return null
+                state.length = (l0 shl 16) or (l1 shl 8) or l2
+
+                val t = inputStream.read()
+                if (t == -1) return null
+                state.typeId = t
             }
             2 -> {
-                timestamp = (inputStream.read() shl 16) or (inputStream.read() shl 8) or inputStream.read()
+                val b0 = inputStream.read(); val b1 = inputStream.read(); val b2 = inputStream.read()
+                if (b0 == -1 || b1 == -1 || b2 == -1) return null
+                state.timestamp = (b0 shl 16) or (b1 shl 8) or b2
             }
             3 -> {
-                // Continue with previous header
+                // Continue with previous header state
             }
         }
 
-        if (length <= 0) return null
+        if (state.length <= 0) return null
 
-        val payload = ByteArray(length)
+        val payload = ByteArray(state.length)
         var offset = 0
-        while (offset < length) {
-            val remainingInChunk = minOf(length - offset, inChunkSize)
+        while (offset < state.length) {
+            val remainingInChunk = minOf(state.length - offset, currentInChunkSize)
             readFully(inputStream, payload, offset, remainingInChunk)
             offset += remainingInChunk
-            if (offset < length) {
-                // Consume continuation chunk header
+            if (offset < state.length) {
+                // Consume continuation chunk header (fmt = 3)
                 val contHeader = inputStream.read()
                 if (contHeader == -1) break
+                val contCsid = contHeader and 0x3F
+                if (contCsid == 0) inputStream.read()
+                else if (contCsid == 1) { inputStream.read(); inputStream.read() }
             }
         }
 
-        return RtmpMessage(csid = csid, messageType = typeId, streamId = streamId, timestamp = timestamp, payload = payload)
+        // Handle Set Chunk Size message from server internally
+        if (state.typeId == MSG_SET_CHUNK_SIZE && payload.size >= 4) {
+            val newSize = ((payload[0].toInt() and 0x7F) shl 24) or
+                    ((payload[1].toInt() and 0xFF) shl 16) or
+                    ((payload[2].toInt() and 0xFF) shl 8) or
+                    (payload[3].toInt() and 0xFF)
+            if (newSize > 0) {
+                currentInChunkSize = newSize
+            }
+        }
+
+        return RtmpMessage(
+            csid = csid,
+            messageType = state.typeId,
+            streamId = state.streamId,
+            timestamp = state.timestamp,
+            payload = payload
+        )
     }
 
     private fun readFully(inputStream: InputStream, buffer: ByteArray, offset: Int, length: Int) {
         var totalRead = 0
         while (totalRead < length) {
             val read = inputStream.read(buffer, offset + totalRead, length - totalRead)
-            if (read == -1) throw java.io.EOFException("Premature EOF reading chunk data")
+            if (read == -1) throw java.io.EOFException("Premature EOF reading chunk data (got $totalRead of $length)")
             totalRead += read
         }
     }
