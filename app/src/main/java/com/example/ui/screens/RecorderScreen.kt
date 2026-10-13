@@ -50,6 +50,7 @@ import androidx.compose.material3.Button
 import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.Card
 import androidx.compose.material3.CardDefaults
+import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.OutlinedButton
@@ -72,6 +73,7 @@ import androidx.core.content.FileProvider
 import com.example.data.model.FpsOption
 import com.example.data.model.RecordingItem
 import com.example.data.model.ResolutionOption
+import com.example.engine.recording.ScreenRecorderManager
 import com.example.ui.ViperStudioViewModel
 import com.example.ui.theme.RecordingRed
 import com.example.ui.theme.TextMuted
@@ -92,6 +94,8 @@ fun RecorderScreen(
     onStartRecordRequest: () -> Unit = {},
     modifier: Modifier = Modifier
 ) {
+    val recordingState by viewModel.recordingState.collectAsState()
+    val recordingError by viewModel.recordingErrorMessage.collectAsState()
     val isRecording by viewModel.isRecording.collectAsState()
     val isPaused by viewModel.isRecordingPaused.collectAsState()
     val durationSec by viewModel.recordingDurationSec.collectAsState()
@@ -121,15 +125,104 @@ fun RecorderScreen(
             .padding(16.dp),
         verticalArrangement = Arrangement.spacedBy(16.dp)
     ) {
+        // Finalizing Progress Indicator Banner
+        AnimatedVisibility(
+            visible = recordingState == ScreenRecorderManager.RecordingState.STOPPING,
+            enter = fadeIn(),
+            exit = fadeOut()
+        ) {
+            Card(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .testTag("finalizing_recording_card"),
+                colors = CardDefaults.cardColors(containerColor = Color(0xFF14243B)),
+                border = androidx.compose.foundation.BorderStroke(1.dp, ViperCyan),
+                shape = RoundedCornerShape(12.dp)
+            ) {
+                Row(
+                    modifier = Modifier.padding(14.dp),
+                    verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.spacedBy(14.dp)
+                ) {
+                    CircularProgressIndicator(
+                        modifier = Modifier.size(24.dp),
+                        color = ViperCyan,
+                        strokeWidth = 2.5.dp
+                    )
+                    Column(verticalArrangement = Arrangement.spacedBy(2.dp)) {
+                        Text(
+                            text = "FINALIZING & SAVING RECORDING...",
+                            fontWeight = FontWeight.Black,
+                            fontSize = 12.sp,
+                            color = ViperCyan,
+                            letterSpacing = 0.5.sp
+                        )
+                        Text(
+                            text = "Draining encoder frames & saving MP4 to Movies/VIPER STUDIO",
+                            fontSize = 11.sp,
+                            color = TextSecondary
+                        )
+                    }
+                }
+            }
+        }
+
+        // Recording Error Banner
+        AnimatedVisibility(
+            visible = recordingError != null || recordingState == ScreenRecorderManager.RecordingState.ERROR,
+            enter = fadeIn(),
+            exit = fadeOut()
+        ) {
+            recordingError?.let { err ->
+                Card(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .testTag("recording_error_banner"),
+                    colors = CardDefaults.cardColors(containerColor = Color(0xFF2E1218)),
+                    border = androidx.compose.foundation.BorderStroke(1.dp, Color(0xFFFF5252)),
+                    shape = RoundedCornerShape(12.dp)
+                ) {
+                    Row(
+                        modifier = Modifier.padding(14.dp),
+                        verticalAlignment = Alignment.CenterVertically,
+                        horizontalArrangement = Arrangement.spacedBy(10.dp)
+                    ) {
+                        Icon(Icons.Default.Close, contentDescription = null, tint = Color(0xFFFF5252), modifier = Modifier.size(20.dp))
+                        Column(modifier = Modifier.weight(1f)) {
+                            Text(
+                                text = "RECORDING FAILED",
+                                fontSize = 12.sp,
+                                fontWeight = FontWeight.Bold,
+                                color = Color(0xFFFF5252)
+                            )
+                            Text(
+                                text = err,
+                                fontSize = 11.sp,
+                                color = TextPrimary
+                            )
+                        }
+                        IconButton(
+                            onClick = { viewModel.dismissRecordingError() },
+                            modifier = Modifier.size(24.dp)
+                        ) {
+                            Icon(Icons.Default.Close, contentDescription = "Dismiss", tint = TextMuted, modifier = Modifier.size(16.dp))
+                        }
+                    }
+                }
+            }
+        }
+
         // Saved Confirmation Banner (Movies/VIPER STUDIO)
         AnimatedVisibility(
-            visible = lastSavedRecording != null,
+            visible = (recordingState == ScreenRecorderManager.RecordingState.SAVED || lastSavedRecording != null) && recordingState != ScreenRecorderManager.RecordingState.STOPPING,
             enter = fadeIn(),
             exit = fadeOut()
         ) {
             lastSavedRecording?.let { savedItem ->
                 Card(
-                    modifier = Modifier.fillMaxWidth(),
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .testTag("saved_recording_banner"),
                     colors = CardDefaults.cardColors(containerColor = Color(0xFF0F2B1E)),
                     border = androidx.compose.foundation.BorderStroke(1.dp, ViperGreen),
                     shape = RoundedCornerShape(12.dp)
@@ -149,8 +242,8 @@ fun RecorderScreen(
                             ) {
                                 Icon(Icons.Default.CheckCircle, contentDescription = null, tint = ViperGreen, modifier = Modifier.size(20.dp))
                                 Text(
-                                    text = "RECORDING SAVED TO MOVIES/VIPER STUDIO",
-                                    fontSize = 11.sp,
+                                    text = "RECORDING SAVED SUCCESSFULLY",
+                                    fontSize = 12.sp,
                                     fontWeight = FontWeight.Black,
                                     color = ViperGreen,
                                     letterSpacing = 1.sp
@@ -163,6 +256,13 @@ fun RecorderScreen(
                                 Icon(Icons.Default.Close, contentDescription = "Close", tint = TextMuted, modifier = Modifier.size(16.dp))
                             }
                         }
+
+                        Text(
+                            text = "Saved to Movies/VIPER STUDIO • Ready in Gallery",
+                            fontSize = 11.sp,
+                            fontWeight = FontWeight.SemiBold,
+                            color = ViperGreen
+                        )
 
                         Text(
                             text = savedItem.filePath,
@@ -189,11 +289,11 @@ fun RecorderScreen(
                                     },
                                     colors = ButtonDefaults.buttonColors(containerColor = ViperGreen, contentColor = Color.Black),
                                     shape = RoundedCornerShape(8.dp),
-                                    modifier = Modifier.height(34.dp)
+                                    modifier = Modifier.height(34.dp).testTag("open_video_button")
                                 ) {
                                     Icon(Icons.Default.PlayArrow, contentDescription = null, modifier = Modifier.size(16.dp))
                                     Spacer(modifier = Modifier.width(4.dp))
-                                    Text("PLAY", fontWeight = FontWeight.Bold, fontSize = 11.sp)
+                                    Text("OPEN VIDEO", fontWeight = FontWeight.Bold, fontSize = 11.sp)
                                 }
 
                                 OutlinedButton(
@@ -201,7 +301,7 @@ fun RecorderScreen(
                                         shareRecordingFile(context, savedItem.filePath)
                                     },
                                     shape = RoundedCornerShape(8.dp),
-                                    modifier = Modifier.height(34.dp)
+                                    modifier = Modifier.height(34.dp).testTag("share_video_button")
                                 ) {
                                     Icon(Icons.Default.Share, contentDescription = null, tint = ViperCyan, modifier = Modifier.size(14.dp))
                                     Spacer(modifier = Modifier.width(4.dp))
@@ -234,14 +334,28 @@ fun RecorderScreen(
                         modifier = Modifier
                             .size(12.dp)
                             .clip(CircleShape)
-                            .background(if (isRecording) RecordingRed else Color.Gray)
+                            .background(
+                                when {
+                                    recordingState == ScreenRecorderManager.RecordingState.STOPPING -> ViperCyan
+                                    isRecording -> RecordingRed
+                                    else -> Color.Gray
+                                }
+                            )
                             .alpha(if (isRecording && !isPaused) pulseAlpha else 1f)
                     )
                     Text(
-                        text = if (isRecording) (if (isPaused) "RECORDING PAUSED" else "RECORDING ACTIVE (MP4)") else "SCREEN RECORDER STANDBY",
+                        text = when {
+                            recordingState == ScreenRecorderManager.RecordingState.STOPPING -> "FINALIZING RECORDING (MP4)"
+                            isRecording -> if (isPaused) "RECORDING PAUSED" else "RECORDING ACTIVE (MP4)"
+                            else -> "SCREEN RECORDER STANDBY"
+                        },
                         fontWeight = FontWeight.Black,
                         fontSize = 12.sp,
-                        color = if (isRecording) RecordingRed else ViperCyan,
+                        color = when {
+                            recordingState == ScreenRecorderManager.RecordingState.STOPPING -> ViperCyan
+                            isRecording -> RecordingRed
+                            else -> ViperCyan
+                        },
                         letterSpacing = 1.sp
                     )
                 }
@@ -312,7 +426,30 @@ fun RecorderScreen(
                     modifier = Modifier.fillMaxWidth(),
                     horizontalArrangement = Arrangement.spacedBy(8.dp)
                 ) {
-                    if (!isRecording) {
+                    if (recordingState == ScreenRecorderManager.RecordingState.STOPPING) {
+                        Button(
+                            onClick = { },
+                            enabled = false,
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .height(48.dp)
+                                .testTag("stopping_recording_button"),
+                            colors = ButtonDefaults.buttonColors(
+                                containerColor = Color(0xFF1E283A),
+                                disabledContainerColor = Color(0xFF1E283A),
+                                disabledContentColor = ViperCyan
+                            ),
+                            shape = RoundedCornerShape(10.dp)
+                        ) {
+                            CircularProgressIndicator(
+                                modifier = Modifier.size(18.dp),
+                                color = ViperCyan,
+                                strokeWidth = 2.dp
+                            )
+                            Spacer(modifier = Modifier.width(8.dp))
+                            Text("FINALIZING & SAVING...", fontWeight = FontWeight.Bold, fontSize = 13.sp, color = ViperCyan)
+                        }
+                    } else if (!isRecording) {
                         Button(
                             onClick = onStartRecordRequest,
                             modifier = Modifier
@@ -344,7 +481,7 @@ fun RecorderScreen(
                         // Stop & Save
                         Button(
                             onClick = { viewModel.stopScreenRecording() },
-                            modifier = Modifier.weight(1f).height(48.dp),
+                            modifier = Modifier.weight(1f).height(48.dp).testTag("stop_recording_button"),
                             colors = ButtonDefaults.buttonColors(containerColor = RecordingRed, contentColor = Color.White),
                             shape = RoundedCornerShape(10.dp)
                         ) {

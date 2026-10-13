@@ -22,6 +22,7 @@ import androidx.core.app.NotificationCompat
 import androidx.core.content.ContextCompat
 import com.example.MainActivity
 import com.example.ViperStudioApplication
+import com.example.engine.recording.ScreenRecorderManager
 import com.example.data.model.NetworkHealth
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
@@ -40,6 +41,7 @@ class StreamForegroundService : Service() {
 
         const val ACTION_START_STREAM = "ACTION_START_STREAM"
         const val ACTION_STOP_STREAM = "ACTION_STOP_STREAM"
+        const val ACTION_STOP_RECORDING = "ACTION_STOP_RECORDING"
         const val ACTION_UPDATE_STATUS = "ACTION_UPDATE_STATUS"
 
         const val EXTRA_RESULT_CODE = "EXTRA_RESULT_CODE"
@@ -53,6 +55,17 @@ class StreamForegroundService : Service() {
         @Volatile
         var isServiceRunning: Boolean = false
             private set
+
+        fun stopRecording(context: Context) {
+            val intent = Intent(context, StreamForegroundService::class.java).apply {
+                action = ACTION_STOP_RECORDING
+            }
+            try {
+                context.startService(intent)
+            } catch (e: Exception) {
+                Log.e(TAG, "Failed to send stop recording to StreamForegroundService", e)
+            }
+        }
 
         fun startServiceWithProjection(
             context: Context,
@@ -140,6 +153,12 @@ class StreamForegroundService : Service() {
         }
 
         when (intent.action) {
+            ACTION_STOP_RECORDING -> {
+                Log.i(TAG, "ACTION_STOP_RECORDING received in StreamForegroundService.")
+                val app = applicationContext as? ViperStudioApplication
+                app?.screenRecorderManager?.stopRecording()
+                return START_NOT_STICKY
+            }
             ACTION_STOP_STREAM -> {
                 Log.i(TAG, "ACTION_STOP_STREAM received. Cleaning up.")
                 stopServiceInternal()
@@ -193,6 +212,8 @@ class StreamForegroundService : Service() {
                     projection.registerCallback(projectionCallback, Handler(Looper.getMainLooper()))
                     currentMediaProjection = projection
                     Log.i(TAG, "MediaProjection successfully acquired and callback registered.")
+                    val app = applicationContext as? ViperStudioApplication
+                    app?.screenRecorderManager?.onMediaProjectionReady(projection)
                 } else {
                     Log.w(TAG, "MediaProjectionManager.getMediaProjection returned null.")
                     notifyStreamError("Screen capture permission was not recognized by Android.")
@@ -296,26 +317,65 @@ class StreamForegroundService : Service() {
             PendingIntent.FLAG_IMMUTABLE or PendingIntent.FLAG_UPDATE_CURRENT
         )
 
-        val stopIntent = Intent(this, StreamForegroundService::class.java).apply {
-            action = ACTION_STOP_STREAM
-        }
-        val stopPendingIntent = PendingIntent.getService(
-            this,
-            1,
-            stopIntent,
-            PendingIntent.FLAG_IMMUTABLE
-        )
+        val app = applicationContext as? ViperStudioApplication
+        val isRecordingActive = app?.screenRecorderManager?.isRecording?.value == true ||
+            app?.screenRecorderManager?.recordingState?.value == com.example.engine.recording.ScreenRecorderManager.RecordingState.RECORDING ||
+            app?.screenRecorderManager?.recordingState?.value == com.example.engine.recording.ScreenRecorderManager.RecordingState.STARTING
 
-        return NotificationCompat.Builder(this, CHANNEL_ID)
-            .setContentTitle("VIPER STUDIO • $streamTitle")
-            .setContentText(statusText)
+        val isStreamingActive = app?.rtmpStreamEngine?.stats?.value?.isStreaming == true ||
+            app?.rtmpStreamEngine?.stats?.value?.isConnecting == true
+
+        val builder = NotificationCompat.Builder(this, CHANNEL_ID)
             .setSmallIcon(android.R.drawable.ic_menu_camera)
             .setOngoing(true)
             .setContentIntent(pendingIntent)
-            .addAction(android.R.drawable.ic_media_pause, "END BROADCAST", stopPendingIntent)
             .setPriority(NotificationCompat.PRIORITY_HIGH)
             .setCategory(NotificationCompat.CATEGORY_SERVICE)
-            .build()
+
+        if (isRecordingActive && !isStreamingActive) {
+            builder.setContentTitle("VIPER STUDIO • Screen Recording")
+            builder.setContentText(statusText.ifBlank { "Recording MP4 to Movies/VIPER STUDIO..." })
+
+            val stopRecIntent = Intent(this, StreamForegroundService::class.java).apply {
+                action = ACTION_STOP_RECORDING
+            }
+            val stopRecPending = PendingIntent.getService(
+                this,
+                2,
+                stopRecIntent,
+                PendingIntent.FLAG_IMMUTABLE or PendingIntent.FLAG_UPDATE_CURRENT
+            )
+            builder.addAction(android.R.drawable.ic_media_pause, "STOP RECORDING", stopRecPending)
+        } else {
+            builder.setContentTitle("VIPER STUDIO • $streamTitle")
+            builder.setContentText(statusText)
+
+            val stopIntent = Intent(this, StreamForegroundService::class.java).apply {
+                action = ACTION_STOP_STREAM
+            }
+            val stopPendingIntent = PendingIntent.getService(
+                this,
+                1,
+                stopIntent,
+                PendingIntent.FLAG_IMMUTABLE
+            )
+            builder.addAction(android.R.drawable.ic_media_pause, "END BROADCAST", stopPendingIntent)
+
+            if (isRecordingActive) {
+                val stopRecIntent = Intent(this, StreamForegroundService::class.java).apply {
+                    action = ACTION_STOP_RECORDING
+                }
+                val stopRecPending = PendingIntent.getService(
+                    this,
+                    2,
+                    stopRecIntent,
+                    PendingIntent.FLAG_IMMUTABLE or PendingIntent.FLAG_UPDATE_CURRENT
+                )
+                builder.addAction(android.R.drawable.ic_menu_save, "STOP RECORDING", stopRecPending)
+            }
+        }
+
+        return builder.build()
     }
 
     private fun observeStreamStats() {
@@ -350,14 +410,24 @@ class StreamForegroundService : Service() {
                     buildInitialNotification(isProjectionConsentActive, currentStreamTitle, statusText)
                 )
 
+                val isRecActive = (app.screenRecorderManager.isRecording.value) ||
+                    (app.screenRecorderManager.recordingState.value != ScreenRecorderManager.RecordingState.IDLE &&
+                     app.screenRecorderManager.recordingState.value != ScreenRecorderManager.RecordingState.SAVED &&
+                     app.screenRecorderManager.recordingState.value != ScreenRecorderManager.RecordingState.ERROR)
+
                 // Only auto-stop if a session WAS ACTUALLY ACTIVE and has now stopped completely
-                if (wasActiveSession && !stats.isStreaming && !stats.isConnecting && (app.screenRecorderManager.isRecording.value == false)) {
+                if (wasActiveSession && !stats.isStreaming && !stats.isConnecting && !isRecActive) {
                     Log.i(TAG, "Active broadcast session ended. Shutting down foreground service after grace period.")
                     delay(1500)
                     // Re-check after grace period before stopping
+                    val stillRecActive = (app.screenRecorderManager.isRecording.value) ||
+                        (app.screenRecorderManager.recordingState.value != ScreenRecorderManager.RecordingState.IDLE &&
+                         app.screenRecorderManager.recordingState.value != ScreenRecorderManager.RecordingState.SAVED &&
+                         app.screenRecorderManager.recordingState.value != ScreenRecorderManager.RecordingState.ERROR)
+
                     if (!app.rtmpStreamEngine.stats.value.isStreaming &&
                         !app.rtmpStreamEngine.stats.value.isConnecting &&
-                        (app.screenRecorderManager.isRecording.value == false)) {
+                        !stillRecActive) {
                         stopServiceInternal()
                     }
                 }

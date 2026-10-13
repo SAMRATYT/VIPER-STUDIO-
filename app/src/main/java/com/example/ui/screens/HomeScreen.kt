@@ -57,6 +57,7 @@ import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import com.example.engine.recording.ScreenRecorderManager
 import com.example.ui.ViperStudioViewModel
 import com.example.ui.components.DualChannelVUMeter
 import com.example.ui.components.TelemetryBadgeBar
@@ -89,6 +90,7 @@ fun HomeScreen(
     val micLevel by viewModel.micLevel.collectAsState()
     val gameLevel by viewModel.gameLevel.collectAsState()
     val isRecording by viewModel.isRecording.collectAsState()
+    val recordingState by viewModel.recordingState.collectAsState()
     val scenes by viewModel.scenes.collectAsState()
     val activeScene by viewModel.activeScene.collectAsState()
     val recordings by viewModel.recordingsList.collectAsState()
@@ -484,16 +486,24 @@ fun HomeScreen(
                         lineHeight = 15.sp
                     )
 
+                    val isStopping = recordingState == ScreenRecorderManager.RecordingState.STOPPING
                     Button(
                         onClick = {
-                            if (isRecording) viewModel.stopScreenRecording() else onStartRecordRequest()
+                            if (isRecording && !isStopping) viewModel.stopScreenRecording() else if (!isStopping) onStartRecordRequest()
                         },
+                        enabled = !isStopping,
                         modifier = Modifier
                             .fillMaxWidth()
                             .testTag("hero_record_button"),
                         colors = ButtonDefaults.buttonColors(
-                            containerColor = if (isRecording) RecordingRed else ViperCyan,
-                            contentColor = Color.Black
+                            containerColor = when {
+                                isStopping -> Color(0xFF1E283A)
+                                isRecording -> RecordingRed
+                                else -> ViperCyan
+                            },
+                            contentColor = if (isStopping) ViperCyan else Color.Black,
+                            disabledContainerColor = Color(0xFF1E283A),
+                            disabledContentColor = ViperCyan
                         ),
                         shape = RoundedCornerShape(8.dp)
                     ) {
@@ -504,7 +514,11 @@ fun HomeScreen(
                         )
                         Spacer(modifier = Modifier.width(4.dp))
                         Text(
-                            text = if (isRecording) "STOP REC" else "RECORD",
+                            text = when {
+                                isStopping -> "SAVING..."
+                                isRecording -> "STOP REC"
+                                else -> "RECORD"
+                            },
                             fontWeight = FontWeight.Black,
                             fontSize = 12.sp
                         )

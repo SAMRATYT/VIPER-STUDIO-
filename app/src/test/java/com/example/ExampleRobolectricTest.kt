@@ -556,5 +556,182 @@ class ExampleRobolectricTest {
         assertEquals(960, resampled)
         assertEquals(5000.toShort(), dstStereo[0])
     }
+
+    @Test
+    fun `test screen recorder state machine from idle to recording to stopping and saved`() = kotlinx.coroutines.runBlocking {
+        val context = ApplicationProvider.getApplicationContext<Context>()
+        val db = com.example.data.local.ViperStudioDatabase.getDatabase(context)
+        val recorder = com.example.engine.recording.ScreenRecorderManager(context, db)
+
+        assertEquals(com.example.engine.recording.ScreenRecorderManager.RecordingState.IDLE, recorder.recordingState.value)
+
+        recorder.startRecording(ResolutionOption.RES_1080P, isLandscape = true)
+        // Allow coroutine to start
+        kotlinx.coroutines.delay(100)
+        assertTrue(
+            "State should be STARTING or RECORDING",
+            recorder.recordingState.value == com.example.engine.recording.ScreenRecorderManager.RecordingState.STARTING ||
+            recorder.recordingState.value == com.example.engine.recording.ScreenRecorderManager.RecordingState.RECORDING
+        )
+
+        // Wait brief duration then stop
+        kotlinx.coroutines.delay(300)
+        var savedEntity: com.example.data.local.entity.RecordingEntity? = null
+        recorder.stopRecording(
+            onSaved = { entity -> savedEntity = entity },
+            onError = { err -> org.junit.Assert.fail("Recording stop should succeed, got error: $err") }
+        )
+
+        // Wait for IO completion and finalization
+        var attempts = 0
+        while (recorder.recordingState.value == com.example.engine.recording.ScreenRecorderManager.RecordingState.STOPPING && attempts < 30) {
+            kotlinx.coroutines.delay(100)
+            attempts++
+        }
+
+        assertEquals(com.example.engine.recording.ScreenRecorderManager.RecordingState.SAVED, recorder.recordingState.value)
+        assertNotNull("Saved entity should be emitted", recorder.lastSavedRecording.value)
+        val saved = recorder.lastSavedRecording.value
+        assertNotNull(saved)
+        assertTrue("Recording duration must be at least 1s", saved!!.durationSeconds >= 1L)
+        assertTrue("Recording file size must be positive", saved.fileSizeBytes > 0L)
+        assertTrue("Recording path must not be blank", saved.filePath.isNotBlank())
+
+        // Test clearRecordingState transitions back to IDLE
+        recorder.clearRecordingState()
+        assertEquals(com.example.engine.recording.ScreenRecorderManager.RecordingState.IDLE, recorder.recordingState.value)
+    }
+
+    @Test
+    fun `test duplicate stop recording requests are rejected safely`() = kotlinx.coroutines.runBlocking {
+        val context = ApplicationProvider.getApplicationContext<Context>()
+        val db = com.example.data.local.ViperStudioDatabase.getDatabase(context)
+        val recorder = com.example.engine.recording.ScreenRecorderManager(context, db)
+
+        recorder.startRecording(ResolutionOption.RES_720P, isLandscape = true)
+        kotlinx.coroutines.delay(150)
+
+        // First stop request
+        recorder.stopRecording()
+        assertEquals(com.example.engine.recording.ScreenRecorderManager.RecordingState.STOPPING, recorder.recordingState.value)
+
+        // Duplicate stop request while stopping should be ignored safely
+        recorder.stopRecording()
+        assertEquals(com.example.engine.recording.ScreenRecorderManager.RecordingState.STOPPING, recorder.recordingState.value)
+
+        // Wait until saved
+        var attempts = 0
+        while (recorder.recordingState.value == com.example.engine.recording.ScreenRecorderManager.RecordingState.STOPPING && attempts < 30) {
+            kotlinx.coroutines.delay(100)
+            attempts++
+        }
+        assertEquals(com.example.engine.recording.ScreenRecorderManager.RecordingState.SAVED, recorder.recordingState.value)
+    }
+
+    @Test
+    fun `test screen recording in landscape and portrait modes`() = kotlinx.coroutines.runBlocking {
+        val context = ApplicationProvider.getApplicationContext<Context>()
+        val db = com.example.data.local.ViperStudioDatabase.getDatabase(context)
+        val recorder = com.example.engine.recording.ScreenRecorderManager(context, db)
+
+        // 1. Landscape mode
+        recorder.startRecording(ResolutionOption.RES_1080P, isLandscape = true)
+        kotlinx.coroutines.delay(150)
+        recorder.stopRecording()
+        var attempts = 0
+        while (recorder.recordingState.value == com.example.engine.recording.ScreenRecorderManager.RecordingState.STOPPING && attempts < 30) {
+            kotlinx.coroutines.delay(100)
+            attempts++
+        }
+        assertEquals(com.example.engine.recording.ScreenRecorderManager.RecordingState.SAVED, recorder.recordingState.value)
+        val landscapeRec = recorder.lastSavedRecording.value
+        assertNotNull(landscapeRec)
+        assertEquals("1080p", landscapeRec?.resolution)
+
+        recorder.clearRecordingState()
+
+        // 2. Portrait mode
+        recorder.startRecording(ResolutionOption.RES_720P, isLandscape = false)
+        kotlinx.coroutines.delay(150)
+        recorder.stopRecording()
+        attempts = 0
+        while (recorder.recordingState.value == com.example.engine.recording.ScreenRecorderManager.RecordingState.STOPPING && attempts < 30) {
+            kotlinx.coroutines.delay(100)
+            attempts++
+        }
+        assertEquals(com.example.engine.recording.ScreenRecorderManager.RecordingState.SAVED, recorder.recordingState.value)
+        val portraitRec = recorder.lastSavedRecording.value
+        assertNotNull(portraitRec)
+        assertEquals("720p", portraitRec?.resolution)
+    }
+
+    @Test
+    fun `test screen recording with microphone enabled and disabled`() = kotlinx.coroutines.runBlocking {
+        val context = ApplicationProvider.getApplicationContext<Context>()
+        val db = com.example.data.local.ViperStudioDatabase.getDatabase(context)
+        val encoder = com.example.engine.hardware.ScreenCaptureEncoder.getInstance(context)
+        val recorder = com.example.engine.recording.ScreenRecorderManager(context, db)
+
+        // Test with Mic Enabled
+        encoder.isMicAudioEnabled = true
+        recorder.startRecording(ResolutionOption.RES_1080P, isLandscape = true)
+        kotlinx.coroutines.delay(150)
+        recorder.stopRecording()
+        var attempts = 0
+        while (recorder.recordingState.value == com.example.engine.recording.ScreenRecorderManager.RecordingState.STOPPING && attempts < 30) {
+            kotlinx.coroutines.delay(100)
+            attempts++
+        }
+        assertEquals(com.example.engine.recording.ScreenRecorderManager.RecordingState.SAVED, recorder.recordingState.value)
+
+        recorder.clearRecordingState()
+
+        // Test with Mic Disabled
+        encoder.isMicAudioEnabled = false
+        recorder.startRecording(ResolutionOption.RES_1080P, isLandscape = true)
+        kotlinx.coroutines.delay(150)
+        recorder.stopRecording()
+        attempts = 0
+        while (recorder.recordingState.value == com.example.engine.recording.ScreenRecorderManager.RecordingState.STOPPING && attempts < 30) {
+            kotlinx.coroutines.delay(100)
+            attempts++
+        }
+        assertEquals(com.example.engine.recording.ScreenRecorderManager.RecordingState.SAVED, recorder.recordingState.value)
+    }
+
+    @Test
+    fun `test screen recording with game audio enabled and disabled`() = kotlinx.coroutines.runBlocking {
+        val context = ApplicationProvider.getApplicationContext<Context>()
+        val db = com.example.data.local.ViperStudioDatabase.getDatabase(context)
+        val encoder = com.example.engine.hardware.ScreenCaptureEncoder.getInstance(context)
+        val recorder = com.example.engine.recording.ScreenRecorderManager(context, db)
+
+        // Test with Game Audio Enabled
+        encoder.isInternalAudioEnabled = true
+        recorder.startRecording(ResolutionOption.RES_720P, isLandscape = true)
+        kotlinx.coroutines.delay(150)
+        recorder.stopRecording()
+        var attempts = 0
+        while (recorder.recordingState.value == com.example.engine.recording.ScreenRecorderManager.RecordingState.STOPPING && attempts < 30) {
+            kotlinx.coroutines.delay(100)
+            attempts++
+        }
+        assertEquals(com.example.engine.recording.ScreenRecorderManager.RecordingState.SAVED, recorder.recordingState.value)
+
+        recorder.clearRecordingState()
+
+        // Test with Game Audio Disabled
+        encoder.isInternalAudioEnabled = false
+        recorder.startRecording(ResolutionOption.RES_720P, isLandscape = true)
+        kotlinx.coroutines.delay(150)
+        recorder.stopRecording()
+        attempts = 0
+        while (recorder.recordingState.value == com.example.engine.recording.ScreenRecorderManager.RecordingState.STOPPING && attempts < 30) {
+            kotlinx.coroutines.delay(100)
+            attempts++
+        }
+        assertEquals(com.example.engine.recording.ScreenRecorderManager.RecordingState.SAVED, recorder.recordingState.value)
+    }
 }
+
 

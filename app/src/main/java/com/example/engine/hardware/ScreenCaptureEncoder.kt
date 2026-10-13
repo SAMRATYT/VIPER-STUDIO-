@@ -915,6 +915,19 @@ class ScreenCaptureEncoder(private val context: Context) : AudioRouteChangeListe
     }
 
     /**
+     * Signals End-of-Stream to the video encoder without immediately tearing down
+     * the pipeline, allowing remaining frames to be drained by active listeners.
+     */
+    fun signalVideoEndOfInputStream() {
+        try {
+            videoCodec?.signalEndOfInputStream()
+            Log.i(TAG_VIDEO, "Signaled EndOfInputStream to video MediaCodec.")
+        } catch (e: Exception) {
+            Log.w(TAG_VIDEO, "signalEndOfInputStream warning: ${e.message}")
+        }
+    }
+
+    /**
      * Stops the encoder pipeline, virtual display, and releases all resources safely.
      */
     @Synchronized

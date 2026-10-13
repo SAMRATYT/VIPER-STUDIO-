@@ -26,6 +26,7 @@ import com.example.data.model.VideoCodecType
 import com.example.engine.audio.AlertSoundSynthesizer
 import com.example.engine.hardware.DeviceHardwareProfile
 import com.example.engine.hardware.HardwareEncoderDetector
+import com.example.engine.recording.ScreenRecorderManager
 import com.example.service.StreamForegroundService
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.delay
@@ -75,12 +76,19 @@ class ViperStudioViewModel(application: Application) : AndroidViewModel(applicat
     val recordingDurationSec: StateFlow<Long> = recorderManager.durationSeconds
     val estimatedRecordingSizeBytes: StateFlow<Long> = recorderManager.estimatedFileSizeBytes
     val availableStorageGb: StateFlow<Float> = recorderManager.availableStorageGb
+    val recordingState: StateFlow<ScreenRecorderManager.RecordingState> = recorderManager.recordingState
+    val recordingErrorMessage: StateFlow<String?> = recorderManager.recordingErrorMessage
 
     private val _lastSavedRecording = MutableStateFlow<RecordingItem?>(null)
     val lastSavedRecording: StateFlow<RecordingItem?> = _lastSavedRecording.asStateFlow()
 
     fun dismissSavedRecordingBanner() {
         _lastSavedRecording.value = null
+        recorderManager.clearRecordingState()
+    }
+
+    fun dismissRecordingError() {
+        recorderManager.clearRecordingState()
     }
 
     val recordingsList: StateFlow<List<RecordingItem>> = db.recordingDao().getAllRecordings()
@@ -641,20 +649,31 @@ class ViperStudioViewModel(application: Application) : AndroidViewModel(applicat
     }
 
     fun stopScreenRecording() {
-        recorderManager.stopRecording { entity ->
-            _lastSavedRecording.value = RecordingItem(
-                id = entity.id,
-                title = entity.title,
-                filePath = entity.filePath,
-                durationSeconds = entity.durationSeconds,
-                fileSizeBytes = entity.fileSizeBytes,
-                resolution = entity.resolution,
-                timestamp = entity.timestamp
-            )
+        if (StreamForegroundService.isServiceRunning) {
+            StreamForegroundService.stopRecording(app)
         }
-        if (!rtmpEngine.stats.value.isStreaming) {
-            StreamForegroundService.stopService(app)
-        }
+        recorderManager.stopRecording(
+            onSaved = { entity ->
+                _lastSavedRecording.value = RecordingItem(
+                    id = entity.id,
+                    title = entity.title,
+                    filePath = entity.filePath,
+                    durationSeconds = entity.durationSeconds,
+                    fileSizeBytes = entity.fileSizeBytes,
+                    resolution = entity.resolution,
+                    timestamp = entity.timestamp
+                )
+                if (!rtmpEngine.stats.value.isStreaming) {
+                    StreamForegroundService.stopService(app)
+                }
+            },
+            onError = { err ->
+                android.util.Log.e("ViperStudioViewModel", "Screen recording finalization error: $err")
+                if (!rtmpEngine.stats.value.isStreaming) {
+                    StreamForegroundService.stopService(app)
+                }
+            }
+        )
     }
 
     fun deleteRecording(item: RecordingItem) {
