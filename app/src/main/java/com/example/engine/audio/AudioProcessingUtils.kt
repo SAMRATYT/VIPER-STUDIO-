@@ -179,4 +179,82 @@ object AudioProcessingUtils {
         val db = 20 * log10(rms / 32767.0)
         return ((db + 60.0) / 60.0).toFloat().coerceIn(0f, 1f)
     }
+
+    // High-pass DC-block filter state for microphone channel
+    private var hpPrevXLeft = 0f
+    private var hpPrevYLeft = 0f
+    private var hpPrevXRight = 0f
+    private var hpPrevYRight = 0f
+
+    // Smoothed noise floor envelope
+    private var smoothedNoiseFloor = 350f
+    private var gainEnvelope = 1.0f
+
+    /**
+     * Software Digital Signal Processing (DSP) Noise Suppressor for Microphone Voice.
+     * Removes 50/60Hz ground hum, low rumble (<80Hz), and attenuates ambient background hiss
+     * using an adaptive downward expander.
+     * Operates exclusively on microphone PCM without affecting internal game audio.
+     */
+    @Synchronized
+    fun suppressMicNoise(buffer: ShortArray, length: Int) {
+        if (length <= 0) return
+
+        // 1. Calculate frame RMS energy
+        var sumSq = 0.0
+        for (i in 0 until length) {
+            val s = buffer[i].toDouble()
+            sumSq += s * s
+        }
+        val currentRms = sqrt(sumSq / length).toFloat()
+
+        // Adaptive noise floor tracking (slowly adapts to ambient background)
+        if (currentRms < smoothedNoiseFloor * 2.0f) {
+            smoothedNoiseFloor = (smoothedNoiseFloor * 0.95f) + (currentRms * 0.05f)
+        } else {
+            smoothedNoiseFloor = (smoothedNoiseFloor * 0.999f) + (currentRms * 0.001f)
+        }
+        val noiseThreshold = smoothedNoiseFloor.coerceIn(120f, 1200f)
+
+        // Target gain: if signal is close to or below noise floor, smoothly attenuate
+        val targetGain = when {
+            currentRms > noiseThreshold * 2.2f -> 1.0f
+            currentRms > noiseThreshold -> {
+                val ratio = (currentRms - noiseThreshold) / (noiseThreshold * 1.2f)
+                0.20f + 0.80f * ratio
+            }
+            else -> 0.12f // ~18dB background hiss attenuation
+        }
+
+        // 2. High-pass filter coefficient (R ≈ 0.985 corresponds to ~80Hz cutoff at 48kHz)
+        val R = 0.985f
+
+        for (i in 0 until length step 2) {
+            // Smooth gain envelope transition (fast attack ~3ms, smooth release ~120ms)
+            if (gainEnvelope < targetGain) {
+                gainEnvelope += (targetGain - gainEnvelope) * 0.04f
+            } else {
+                gainEnvelope += (targetGain - gainEnvelope) * 0.008f
+            }
+
+            // Left channel high-pass
+            val xL = buffer[i].toFloat()
+            val yL = xL - hpPrevXLeft + R * hpPrevYLeft
+            hpPrevXLeft = xL
+            hpPrevYLeft = yL
+
+            // Right channel high-pass
+            val rightIdx = (i + 1).coerceAtMost(length - 1)
+            val xR = buffer[rightIdx].toFloat()
+            val yR = xR - hpPrevXRight + R * hpPrevYRight
+            hpPrevXRight = xR
+            hpPrevYRight = yR
+
+            // Apply noise-reduction gain & soft limiter
+            buffer[i] = softClip(yL * gainEnvelope)
+            if (rightIdx < length) {
+                buffer[rightIdx] = softClip(yR * gainEnvelope)
+            }
+        }
+    }
 }

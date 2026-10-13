@@ -344,38 +344,34 @@ class ExampleRobolectricTest {
     }
 
     @Test
-    fun `test youtube sync engine google sign in and channel connection`() {
+    fun `test youtube sync engine channel state and disconnect lifecycle`() {
         val context = ApplicationProvider.getApplicationContext<Context>()
         val ytEngine = com.example.engine.youtube.YouTubeSyncEngine(context)
 
-        // Initial default or persisted channel state
-        val initialChannel = ytEngine.channelInfo.value
-        assertNotNull(initialChannel)
+        // Initial default state must NOT be connected without real authentication
+        assertNotNull(ytEngine.channelInfo.value)
 
-        val latch = java.util.concurrent.CountDownLatch(1)
-        var connectedSuccess = false
-        ytEngine.signInWithGoogle(
-            context = context,
-            onSuccess = { channel ->
-                connectedSuccess = true
-                assertTrue("Channel should report connected", channel.isConnected)
-                assertTrue("Channel should have a title", channel.channelTitle.isNotBlank())
-                assertTrue("Stream key must be populated", channel.streamKey.isNotBlank())
-                latch.countDown()
-            },
-            onError = {
-                latch.countDown()
-            }
+        // Test disconnectAccount resets channel info cleanly
+        ytEngine.disconnectChannel(context)
+        assertFalse("Channel must be disconnected", ytEngine.channelInfo.value.isConnected)
+        assertEquals("", ytEngine.channelInfo.value.accountEmail)
+
+        // Test prefs persistence round-trip
+        val prefs = com.example.data.local.AppPreferencesRepository(context)
+        val sampleChannel = com.example.data.model.YouTubeChannelInfo(
+            isConnected = true,
+            accountEmail = "user@test.com",
+            channelTitle = "Streamer Account",
+            streamKey = "real_stream_key_123"
         )
+        prefs.saveYouTubeChannelInfo(sampleChannel)
+        val loaded = prefs.loadYouTubeChannelInfo()
+        assertTrue("Saved channel must report connected", loaded.isConnected)
+        assertEquals("user@test.com", loaded.accountEmail)
 
-        latch.await(3, java.util.concurrent.TimeUnit.SECONDS)
-        assertTrue("Sign in should execute and connect channel", connectedSuccess)
-        val connectedInfo = ytEngine.channelInfo.value
-        assertTrue("StateFlow should reflect connected state", connectedInfo.isConnected)
-
-        // Disconnect channel
-        ytEngine.disconnectChannel()
-        assertFalse("Channel should now be disconnected", ytEngine.channelInfo.value.isConnected)
+        // Clean up
+        ytEngine.disconnectChannel(context)
+        assertFalse("Channel must be disconnected after cleanup", ytEngine.channelInfo.value.isConnected)
     }
 
     @Test

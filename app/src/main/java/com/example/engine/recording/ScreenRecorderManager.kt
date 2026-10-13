@@ -341,11 +341,12 @@ class ScreenRecorderManager(
                             put(MediaStore.Video.Media.IS_PENDING, 1)
                         }
                         put(MediaStore.Video.Media.DATE_ADDED, System.currentTimeMillis() / 1000)
+                        put(MediaStore.Video.Media.DATE_MODIFIED, System.currentTimeMillis() / 1000)
                     }
 
                     val uri = context.contentResolver.insert(MediaStore.Video.Media.EXTERNAL_CONTENT_URI, values)
                     if (uri != null) {
-                        context.contentResolver.openOutputStream(uri)?.use { os ->
+                        context.contentResolver.openOutputStream(uri, "w")?.use { os ->
                             FileInputStream(staging).use { fis ->
                                 fis.copyTo(os)
                             }
@@ -355,7 +356,29 @@ class ScreenRecorderManager(
                             values.put(MediaStore.Video.Media.IS_PENDING, 0)
                             context.contentResolver.update(uri, values, null, null)
                         }
-                        Log.i(TAG, "Recording successfully registered in Android MediaStore: $uri")
+                        Log.i(TAG, "Recording successfully registered and finalized in Android MediaStore: $uri")
+
+                        // Query resolved public file path from MediaStore
+                        try {
+                            val proj = arrayOf(MediaStore.Video.Media.DATA)
+                            context.contentResolver.query(uri, proj, null, null, null)?.use { cursor ->
+                                if (cursor.moveToFirst()) {
+                                    val colIdx = cursor.getColumnIndex(MediaStore.Video.Media.DATA)
+                                    if (colIdx != -1) {
+                                        val path = cursor.getString(colIdx)
+                                        if (!path.isNullOrBlank()) {
+                                            finalFilePath = path
+                                            val diskFile = File(path)
+                                            if (diskFile.exists()) {
+                                                finalFileSizeBytes = diskFile.length()
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                        } catch (e: Exception) {
+                            Log.d(TAG, "MediaStore path query note: ${e.message}")
+                        }
                     }
                 } catch (e: Exception) {
                     Log.w(TAG, "MediaStore insert warning: ${e.message}")
@@ -363,12 +386,17 @@ class ScreenRecorderManager(
 
                 // Trigger MediaScannerConnection so the file is instantly indexed by Gallery & Google Photos
                 try {
-                    MediaScannerConnection.scanFile(
-                        context,
-                        arrayOf(finalFilePath),
-                        arrayOf("video/mp4"),
-                        null
-                    )
+                    val pathsToScan = mutableListOf<String>()
+                    if (finalFilePath.isNotBlank()) pathsToScan.add(finalFilePath)
+                    if (publicF != null && publicF.exists()) pathsToScan.add(publicF.absolutePath)
+                    if (pathsToScan.isNotEmpty()) {
+                        MediaScannerConnection.scanFile(
+                            context,
+                            pathsToScan.toTypedArray(),
+                            arrayOf("video/mp4"),
+                            null
+                        )
+                    }
                 } catch (_: Exception) {}
 
                 val entity = RecordingEntity(

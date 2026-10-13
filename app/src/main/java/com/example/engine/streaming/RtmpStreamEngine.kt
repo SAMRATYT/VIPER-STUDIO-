@@ -651,69 +651,86 @@ class RtmpStreamEngine(private val context: Context) {
         val rawBytes = ByteArray(dup.remaining())
         dup.get(rawBytes)
 
-        var naluOffset = 0
-        if (rawBytes.size >= 4 && rawBytes[0] == 0.toByte() && rawBytes[1] == 0.toByte() && rawBytes[2] == 0.toByte() && rawBytes[3] == 1.toByte()) {
-            naluOffset = 4
-        } else if (rawBytes.size >= 3 && rawBytes[0] == 0.toByte() && rawBytes[1] == 0.toByte() && rawBytes[2] == 1.toByte()) {
-            naluOffset = 3
-        }
-        val naluBodySize = (rawBytes.size - naluOffset).coerceAtLeast(0)
+        val nalus = extractAnnexBNalus(rawBytes)
+        val hasSps = nalus.any { it.isNotEmpty() && (it[0].toInt() and 0x1F) == 7 }
+        val hasPps = nalus.any { it.isNotEmpty() && (it[0].toInt() and 0x1F) == 8 }
 
-        if (isKeyFrame && sps.isNotEmpty() && pps.isNotEmpty()) {
-            val totalSize = 5 + (4 + sps.size) + (4 + pps.size) + (4 + naluBodySize)
-            val packet = ByteArray(totalSize)
-            var idx = 0
-            packet[idx++] = 0x17.toByte() // Keyframe (1), AVC (7)
-            packet[idx++] = 0x01.toByte() // AVC NALU
-            packet[idx++] = 0x00.toByte()
-            packet[idx++] = 0x00.toByte()
-            packet[idx++] = 0x00.toByte()
-
-            // 1. SPS NALU
-            packet[idx++] = ((sps.size shr 24) and 0xFF).toByte()
-            packet[idx++] = ((sps.size shr 16) and 0xFF).toByte()
-            packet[idx++] = ((sps.size shr 8) and 0xFF).toByte()
-            packet[idx++] = (sps.size and 0xFF).toByte()
-            System.arraycopy(sps, 0, packet, idx, sps.size)
-            idx += sps.size
-
-            // 2. PPS NALU
-            packet[idx++] = ((pps.size shr 24) and 0xFF).toByte()
-            packet[idx++] = ((pps.size shr 16) and 0xFF).toByte()
-            packet[idx++] = ((pps.size shr 8) and 0xFF).toByte()
-            packet[idx++] = (pps.size and 0xFF).toByte()
-            System.arraycopy(pps, 0, packet, idx, pps.size)
-            idx += pps.size
-
-            // 3. IDR Slice NALU
-            packet[idx++] = ((naluBodySize shr 24) and 0xFF).toByte()
-            packet[idx++] = ((naluBodySize shr 16) and 0xFF).toByte()
-            packet[idx++] = ((naluBodySize shr 8) and 0xFF).toByte()
-            packet[idx++] = (naluBodySize and 0xFF).toByte()
-            if (naluBodySize > 0) {
-                System.arraycopy(rawBytes, naluOffset, packet, idx, naluBodySize)
+        val naluList = mutableListOf<ByteArray>()
+        if (isKeyFrame) {
+            if (!hasSps && sps.isNotEmpty()) {
+                naluList.add(sps)
             }
-
-            return packet
-        } else {
-            val packet = ByteArray(5 + 4 + naluBodySize)
-            var idx = 0
-            packet[idx++] = if (isKeyFrame) 0x17.toByte() else 0x27.toByte()
-            packet[idx++] = 0x01.toByte() // AVC NALU
-            packet[idx++] = 0x00.toByte()
-            packet[idx++] = 0x00.toByte()
-            packet[idx++] = 0x00.toByte()
-
-            packet[idx++] = ((naluBodySize shr 24) and 0xFF).toByte()
-            packet[idx++] = ((naluBodySize shr 16) and 0xFF).toByte()
-            packet[idx++] = ((naluBodySize shr 8) and 0xFF).toByte()
-            packet[idx++] = (naluBodySize and 0xFF).toByte()
-            if (naluBodySize > 0) {
-                System.arraycopy(rawBytes, naluOffset, packet, idx, naluBodySize)
+            if (!hasPps && pps.isNotEmpty()) {
+                naluList.add(pps)
             }
-
-            return packet
         }
+        naluList.addAll(nalus)
+
+        var totalPayloadSize = 0
+        for (nalu in naluList) {
+            totalPayloadSize += 4 + nalu.size
+        }
+
+        val packet = ByteArray(5 + totalPayloadSize)
+        var idx = 0
+        packet[idx++] = if (isKeyFrame) 0x17.toByte() else 0x27.toByte()
+        packet[idx++] = 0x01.toByte() // AVC NALU
+        packet[idx++] = 0x00.toByte() // Composition time offset (0)
+        packet[idx++] = 0x00.toByte()
+        packet[idx++] = 0x00.toByte()
+
+        for (nalu in naluList) {
+            val len = nalu.size
+            packet[idx++] = ((len shr 24) and 0xFF).toByte()
+            packet[idx++] = ((len shr 16) and 0xFF).toByte()
+            packet[idx++] = ((len shr 8) and 0xFF).toByte()
+            packet[idx++] = (len and 0xFF).toByte()
+            System.arraycopy(nalu, 0, packet, idx, len)
+            idx += len
+        }
+
+        return packet
+    }
+
+    private fun extractAnnexBNalus(bytes: ByteArray): List<ByteArray> {
+        val result = mutableListOf<ByteArray>()
+        if (bytes.isEmpty()) return result
+
+        val startPositions = mutableListOf<Int>()
+        val startLengths = mutableListOf<Int>()
+
+        var i = 0
+        while (i < bytes.size - 2) {
+            if (bytes[i] == 0.toByte() && bytes[i + 1] == 0.toByte()) {
+                if (bytes[i + 2] == 1.toByte()) {
+                    startPositions.add(i)
+                    startLengths.add(3)
+                    i += 3
+                    continue
+                } else if (i < bytes.size - 3 && bytes[i + 2] == 0.toByte() && bytes[i + 3] == 1.toByte()) {
+                    startPositions.add(i)
+                    startLengths.add(4)
+                    i += 4
+                    continue
+                }
+            }
+            i++
+        }
+
+        if (startPositions.isEmpty()) {
+            result.add(bytes)
+            return result
+        }
+
+        for (k in 0 until startPositions.size) {
+            val start = startPositions[k] + startLengths[k]
+            val end = if (k + 1 < startPositions.size) startPositions[k + 1] else bytes.size
+            if (end > start) {
+                result.add(bytes.copyOfRange(start, end))
+            }
+        }
+
+        return result
     }
 
     private fun getSpsPpsForResolution(res: ResolutionOption): Pair<ByteArray, ByteArray> {

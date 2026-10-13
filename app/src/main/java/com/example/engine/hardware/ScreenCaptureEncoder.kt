@@ -801,6 +801,11 @@ class ScreenCaptureEncoder(private val context: Context) : AudioRouteChangeListe
                     micJitterBuffer.poll(micPcm)
                     gameJitterBuffer.poll(gamePcm)
 
+                    // Apply microphone software noise suppression if enabled (internal game audio unaffected)
+                    if (isNoiseSuppressionEnabled && isMicAudioEnabled && !isMicMuted) {
+                        AudioProcessingUtils.suppressMicNoise(micPcm, micPcm.size)
+                    }
+
                     // Software mixing with soft-clipping limiter and independent toggles
                     AudioProcessingUtils.mixStereoPcm(
                         micPcm = micPcm,
