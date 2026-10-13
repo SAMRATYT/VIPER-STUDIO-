@@ -1,6 +1,8 @@
 package com.example.engine.youtube
 
+import android.app.Activity
 import android.content.Context
+import android.content.ContextWrapper
 import android.util.Log
 import androidx.credentials.ClearCredentialStateRequest
 import androidx.credentials.CredentialManager
@@ -8,10 +10,12 @@ import androidx.credentials.CustomCredential
 import androidx.credentials.GetCredentialRequest
 import androidx.credentials.exceptions.GetCredentialCancellationException
 import androidx.credentials.exceptions.GetCredentialException
+import androidx.credentials.exceptions.NoCredentialException
 import com.example.data.local.AppPreferencesRepository
 import com.example.data.model.ChatMessage
 import com.example.data.model.YouTubeChannelInfo
 import com.google.android.libraries.identity.googleid.GetGoogleIdOption
+import com.google.android.libraries.identity.googleid.GetSignInWithGoogleOption
 import com.google.android.libraries.identity.googleid.GoogleIdTokenCredential
 import com.google.firebase.auth.FirebaseAuth
 import com.google.firebase.auth.GoogleAuthProvider
@@ -133,29 +137,54 @@ class YouTubeSyncEngine(private val context: Context) {
                     }
                 }
 
-                val resId = context.resources.getIdentifier("default_web_client_id", "string", context.packageName)
-                val serverClientId = if (resId != 0) {
-                    context.getString(resId)
-                } else {
-                    "227479609974-3m9hai28r18n12tkthp9qjmosc5cvn9c.apps.googleusercontent.com"
+                // Retrieve the configured default_web_client_id from Firebase resources
+                val serverClientId = try {
+                    context.getString(com.example.R.string.default_web_client_id)
+                } catch (e: Exception) {
+                    val resId = context.resources.getIdentifier("default_web_client_id", "string", context.packageName)
+                    if (resId != 0) context.getString(resId) else ""
                 }
 
-                // Explicitly disable auto-select and authorized account filter to ALWAYS display account picker
-                val googleIdOption = GetGoogleIdOption.Builder()
-                    .setFilterByAuthorizedAccounts(false)
-                    .setServerClientId(serverClientId)
-                    .setAutoSelectEnabled(false)
+                if (serverClientId.isBlank()) {
+                    val msg = "Google Sign-In configuration error: default_web_client_id is missing from resources. Ensure google-services.json contains a Web OAuth Client ID."
+                    _authError.value = msg
+                    withContext(Dispatchers.Main) { onError(msg) }
+                    return@launch
+                }
+
+                // Explicit Google Account Selection using GetSignInWithGoogleOption
+                val signInWithGoogleOption = GetSignInWithGoogleOption.Builder(serverClientId)
                     .build()
 
                 val request = GetCredentialRequest.Builder()
-                    .addCredentialOption(googleIdOption)
+                    .addCredentialOption(signInWithGoogleOption)
                     .build()
 
-                val result = credentialManager.getCredential(context = context, request = request)
+                val targetContext = context.findActivity() ?: context
+                val result = try {
+                    credentialManager.getCredential(context = targetContext, request = request)
+                } catch (noCredEx: NoCredentialException) {
+                    Log.w(TAG, "GetSignInWithGoogleOption returned no credentials, trying GetGoogleIdOption fallback: ${noCredEx.message}")
+                    val fallbackGoogleIdOption = GetGoogleIdOption.Builder()
+                        .setFilterByAuthorizedAccounts(false)
+                        .setServerClientId(serverClientId)
+                        .setAutoSelectEnabled(false)
+                        .build()
+                    val fallbackRequest = GetCredentialRequest.Builder()
+                        .addCredentialOption(fallbackGoogleIdOption)
+                        .build()
+                    credentialManager.getCredential(context = targetContext, request = fallbackRequest)
+                }
 
                 val credential = result.credential
-                if (credential is CustomCredential && credential.type == GoogleIdTokenCredential.TYPE_GOOGLE_ID_TOKEN_CREDENTIAL) {
-                    val googleId = GoogleIdTokenCredential.createFrom(credential.data)
+                val isGoogleIdCredential = credential is CustomCredential && (
+                    credential.type == GoogleIdTokenCredential.TYPE_GOOGLE_ID_TOKEN_CREDENTIAL ||
+                    credential.type == GoogleIdTokenCredential.TYPE_GOOGLE_ID_TOKEN_SIWG_CREDENTIAL ||
+                    credential.type.startsWith("com.google.android.libraries.identity.googleid")
+                )
+
+                if (isGoogleIdCredential) {
+                    val googleId = GoogleIdTokenCredential.createFrom((credential as CustomCredential).data)
                     val email = googleId.id
                     val displayName = googleId.displayName ?: email.substringBefore("@")
                     val avatarUrl = googleId.profilePictureUri?.toString() ?: ""
@@ -205,11 +234,24 @@ class YouTubeSyncEngine(private val context: Context) {
                 Log.i(TAG, msg)
                 _authError.value = msg
                 withContext(Dispatchers.Main) { onError(msg) }
-            } catch (e: GetCredentialException) {
-                val msg = "Google Sign-In failed: ${e.message ?: "Authentication error"}"
+            } catch (e: NoCredentialException) {
+                val msg = "No Google credentials available on this device. Please ensure a Google Account is active under device Settings > Accounts and Google Play Services is updated."
                 Log.w(TAG, msg, e)
                 _authError.value = msg
                 withContext(Dispatchers.Main) { onError(msg) }
+            } catch (e: GetCredentialException) {
+                val rawMsg = e.message ?: "Authentication error"
+                val isDevError = rawMsg.contains("16") || rawMsg.contains("DEVELOPER_ERROR", ignoreCase = true)
+                val userMsg = if (isDevError) {
+                    "Google Sign-In configuration error (Developer Error 16): Ensure the APK signing SHA-1 (de1723213c1fcf784ec6a508c6ed2b29471da453) and package name (com.aistudio.viperstudio.gxltqv) match the Android OAuth Client in Google Cloud / Firebase Console."
+                } else if (rawMsg.contains("No credentials", ignoreCase = true)) {
+                    "No Google credentials available on this device. Please ensure a Google Account is active under device Settings > Accounts."
+                } else {
+                    "Google Sign-In failed: $rawMsg"
+                }
+                Log.w(TAG, userMsg, e)
+                _authError.value = userMsg
+                withContext(Dispatchers.Main) { onError(userMsg) }
             } catch (e: Throwable) {
                 val msg = "Authentication failed: ${e.localizedMessage ?: "Unexpected error"}"
                 Log.e(TAG, msg, e)
@@ -496,4 +538,13 @@ class YouTubeSyncEngine(private val context: Context) {
             )
         )
     }
+}
+
+private fun Context.findActivity(): Activity? {
+    var cur = this
+    while (cur is ContextWrapper) {
+        if (cur is Activity) return cur
+        cur = cur.baseContext
+    }
+    return null
 }

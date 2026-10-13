@@ -1,5 +1,6 @@
 package com.example.engine.recording
 
+import android.content.ContentUris
 import android.content.ContentValues
 import android.content.Context
 import android.content.pm.PackageManager
@@ -7,6 +8,7 @@ import android.media.MediaCodec
 import android.media.MediaFormat
 import android.media.MediaMuxer
 import android.media.MediaScannerConnection
+import android.net.Uri
 import android.os.Build
 import android.os.Environment
 import android.os.StatFs
@@ -80,6 +82,58 @@ class ScreenRecorderManager(
     private val muxerLock = Any()
     private val recordedVideoFramesCount = AtomicLong(0)
     private val recordedAudioFramesCount = AtomicLong(0)
+    private var videoFormatAddedTimestampMs = 0L
+
+    private data class QueuedSample(
+        val isVideo: Boolean,
+        val buffer: ByteBuffer,
+        val bufferInfo: MediaCodec.BufferInfo
+    )
+    private val pendingSamplesQueue = java.util.ArrayDeque<QueuedSample>()
+
+    private fun tryStartMuxerLocked(forceWithoutAudio: Boolean = false) {
+        val muxer = mediaMuxer ?: return
+        if (isMuxerStarted.get()) return
+        if (videoTrackIndex == -1) return
+
+        val encoder = ScreenCaptureEncoder.getInstance(context)
+        val isAudioActive = encoder.isAudioActive()
+
+        if (audioTrackIndex != -1 || !isAudioActive || forceWithoutAudio) {
+            try {
+                muxer.start()
+                isMuxerStarted.set(true)
+                Log.i(TAG_MUXER, "MediaMuxer started successfully (videoTrack=$videoTrackIndex, audioTrack=$audioTrackIndex, forceWithoutAudio=$forceWithoutAudio).")
+                flushPendingSamplesLocked()
+            } catch (e: Exception) {
+                Log.e(TAG_MUXER, "Failed to start MediaMuxer: ${e.message}", e)
+            }
+        } else {
+            Log.i(TAG_MUXER, "Video track added (index $videoTrackIndex); waiting for audio track before starting MediaMuxer.")
+        }
+    }
+
+    private fun flushPendingSamplesLocked() {
+        val muxer = mediaMuxer ?: return
+        if (!isMuxerStarted.get()) return
+
+        while (!pendingSamplesQueue.isEmpty()) {
+            val sample = pendingSamplesQueue.poll() ?: break
+            try {
+                val track = if (sample.isVideo) videoTrackIndex else audioTrackIndex
+                if (track != -1 && sample.bufferInfo.size > 0) {
+                    muxer.writeSampleData(track, sample.buffer, sample.bufferInfo)
+                    if (sample.isVideo) {
+                        recordedVideoFramesCount.incrementAndGet()
+                    } else {
+                        recordedAudioFramesCount.incrementAndGet()
+                    }
+                }
+            } catch (e: Exception) {
+                Log.w(TAG_MUXER, "Error flushing pending sample: ${e.message}")
+            }
+        }
+    }
 
     private val videoListener = object : VideoFrameListener {
         override fun onVideoFormatAvailable(format: MediaFormat, sps: ByteArray, pps: ByteArray) {
@@ -88,16 +142,9 @@ class ScreenRecorderManager(
                 if (videoTrackIndex == -1 && !isMuxerStarted.get()) {
                     try {
                         videoTrackIndex = muxer.addTrack(format)
+                        videoFormatAddedTimestampMs = System.currentTimeMillis()
                         Log.i(TAG_MUXER, "Hardware video track added to MediaMuxer (index $videoTrackIndex). Format: $format")
-                        val encoder = ScreenCaptureEncoder.getInstance(context)
-                        val isAudioActive = encoder.isAudioActive()
-                        if (audioTrackIndex != -1 || !isAudioActive) {
-                            muxer.start()
-                            isMuxerStarted.set(true)
-                            Log.i(TAG_MUXER, "MediaMuxer started with video track $videoTrackIndex and audio track $audioTrackIndex (isAudioActive=$isAudioActive).")
-                        } else {
-                            Log.i(TAG_MUXER, "Video track added; waiting for audio track before starting MediaMuxer.")
-                        }
+                        tryStartMuxerLocked()
                     } catch (e: Exception) {
                         Log.e(TAG_MUXER, "Error adding video track to MediaMuxer: ${e.message}", e)
                     }
@@ -115,12 +162,39 @@ class ScreenRecorderManager(
             if (_isPaused.value) return
             synchronized(muxerLock) {
                 val muxer = mediaMuxer ?: return
+
+                // If audio track hasn't arrived within 1000ms, start muxer with video track only
+                if (!isMuxerStarted.get() && videoTrackIndex != -1 && videoFormatAddedTimestampMs > 0) {
+                    if (System.currentTimeMillis() - videoFormatAddedTimestampMs > 1000L) {
+                        Log.i(TAG_MUXER, "Audio track timeout (1000ms). Starting MediaMuxer with video track only.")
+                        tryStartMuxerLocked(forceWithoutAudio = true)
+                    }
+                }
+
                 if (isMuxerStarted.get() && videoTrackIndex != -1 && bufferInfo.size > 0) {
                     try {
                         muxer.writeSampleData(videoTrackIndex, byteBuffer, bufferInfo)
                         recordedVideoFramesCount.incrementAndGet()
                     } catch (e: Exception) {
                         Log.w(TAG_MUXER, "Error writing video sample: ${e.message}")
+                    }
+                } else if (!isMuxerStarted.get() && videoTrackIndex != -1 && bufferInfo.size > 0) {
+                    // Buffer pending video sample while waiting for muxer start
+                    if (pendingSamplesQueue.size < 90) { // Keep up to 3 seconds of 30fps video
+                        val cloneBuffer = ByteBuffer.allocate(bufferInfo.size)
+                        val originalPos = byteBuffer.position()
+                        byteBuffer.position(bufferInfo.offset)
+                        val limit = byteBuffer.limit()
+                        byteBuffer.limit(bufferInfo.offset + bufferInfo.size)
+                        cloneBuffer.put(byteBuffer)
+                        cloneBuffer.flip()
+                        byteBuffer.position(originalPos)
+                        byteBuffer.limit(limit)
+
+                        val cloneInfo = MediaCodec.BufferInfo().apply {
+                            set(0, bufferInfo.size, bufferInfo.presentationTimeUs, bufferInfo.flags)
+                        }
+                        pendingSamplesQueue.add(QueuedSample(true, cloneBuffer, cloneInfo))
                     }
                 }
             }
@@ -135,11 +209,7 @@ class ScreenRecorderManager(
                     try {
                         audioTrackIndex = muxer.addTrack(format)
                         Log.i(TAG_MUXER, "Hardware audio track added to MediaMuxer (index $audioTrackIndex). Format: $format")
-                        if (videoTrackIndex != -1) {
-                            muxer.start()
-                            isMuxerStarted.set(true)
-                            Log.i(TAG_MUXER, "MediaMuxer started with video track $videoTrackIndex and audio track $audioTrackIndex.")
-                        }
+                        tryStartMuxerLocked()
                     } catch (e: Exception) {
                         Log.e(TAG_MUXER, "Error adding audio track to MediaMuxer: ${e.message}", e)
                     }
@@ -157,6 +227,23 @@ class ScreenRecorderManager(
                         recordedAudioFramesCount.incrementAndGet()
                     } catch (e: Exception) {
                         Log.w(TAG_MUXER, "Error writing audio sample: ${e.message}")
+                    }
+                } else if (!isMuxerStarted.get() && audioTrackIndex != -1 && bufferInfo.size > 0) {
+                    if (pendingSamplesQueue.size < 90) {
+                        val cloneBuffer = ByteBuffer.allocate(bufferInfo.size)
+                        val originalPos = byteBuffer.position()
+                        byteBuffer.position(bufferInfo.offset)
+                        val limit = byteBuffer.limit()
+                        byteBuffer.limit(bufferInfo.offset + bufferInfo.size)
+                        cloneBuffer.put(byteBuffer)
+                        cloneBuffer.flip()
+                        byteBuffer.position(originalPos)
+                        byteBuffer.limit(limit)
+
+                        val cloneInfo = MediaCodec.BufferInfo().apply {
+                            set(0, bufferInfo.size, bufferInfo.presentationTimeUs, bufferInfo.flags)
+                        }
+                        pendingSamplesQueue.add(QueuedSample(false, cloneBuffer, cloneInfo))
                     }
                 }
             }
@@ -304,59 +391,54 @@ class ScreenRecorderManager(
 
             if (staging != null && staging.exists()) {
                 // If the hardware recording did not produce frames (e.g. test or permission revocation), synthesize valid MP4
-                if (staging.length() < 1024) {
+                if (staging.length() < 1024L || recordedVideoFramesCount.get() == 0L) {
                     val alignedWidth = ((res.width + 15) / 16) * 16
                     val alignedHeight = ((res.height + 15) / 16) * 16
                     createEmptyValidMp4(staging, alignedWidth, alignedHeight, duration.coerceAtLeast(1L))
                 }
 
-                // Copy to public Movies/VIPER STUDIO destination
-                if (publicF != null) {
-                    try {
-                        FileInputStream(staging).use { input ->
-                            FileOutputStream(publicF).use { output ->
-                                input.copyTo(output)
-                            }
-                        }
-                        finalFilePath = publicF.absolutePath
-                        finalFileSizeBytes = publicF.length()
-                        Log.i(TAG, "Recording successfully copied to Movies/VIPER STUDIO: $finalFilePath ($finalFileSizeBytes bytes)")
-                    } catch (e: Exception) {
-                        Log.w(TAG, "Copy to public Movies folder failed: ${e.message}")
-                        finalFilePath = staging.absolutePath
-                        finalFileSizeBytes = staging.length()
-                    }
-                } else {
-                    finalFilePath = staging.absolutePath
-                    finalFileSizeBytes = staging.length()
-                }
+                var mediaStoreUri: Uri? = null
 
-                // Android MediaStore Registration (Movies/VIPER STUDIO)
+                // 1. Android MediaStore Registration (Movies/VIPER STUDIO with IS_PENDING=0)
                 try {
                     val values = ContentValues().apply {
+                        put(MediaStore.Video.Media.TITLE, title)
                         put(MediaStore.Video.Media.DISPLAY_NAME, staging.name)
                         put(MediaStore.Video.Media.MIME_TYPE, "video/mp4")
-                        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
-                            put(MediaStore.Video.Media.RELATIVE_PATH, "Movies/VIPER STUDIO")
-                            put(MediaStore.Video.Media.IS_PENDING, 1)
-                        }
                         put(MediaStore.Video.Media.DATE_ADDED, System.currentTimeMillis() / 1000)
                         put(MediaStore.Video.Media.DATE_MODIFIED, System.currentTimeMillis() / 1000)
+                        put(MediaStore.Video.Media.DATE_TAKEN, System.currentTimeMillis())
+                        put(MediaStore.Video.Media.DURATION, duration.coerceAtLeast(1L) * 1000L)
+                        put(MediaStore.Video.Media.WIDTH, res.width)
+                        put(MediaStore.Video.Media.HEIGHT, res.height)
+                        put(MediaStore.Video.Media.SIZE, staging.length())
+
+                        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+                            put(MediaStore.Video.Media.RELATIVE_PATH, "Movies/VIPER STUDIO/")
+                            put(MediaStore.Video.Media.IS_PENDING, 1)
+                        }
                     }
 
                     val uri = context.contentResolver.insert(MediaStore.Video.Media.EXTERNAL_CONTENT_URI, values)
                     if (uri != null) {
+                        mediaStoreUri = uri
                         context.contentResolver.openOutputStream(uri, "w")?.use { os ->
                             FileInputStream(staging).use { fis ->
                                 fis.copyTo(os)
                             }
+                            os.flush()
                         }
-                        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
-                            values.clear()
-                            values.put(MediaStore.Video.Media.IS_PENDING, 0)
-                            context.contentResolver.update(uri, values, null, null)
+
+                        // Finalize with IS_PENDING = 0 and updated metadata
+                        val updateValues = ContentValues().apply {
+                            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+                                put(MediaStore.Video.Media.IS_PENDING, 0)
+                            }
+                            put(MediaStore.Video.Media.DATE_MODIFIED, System.currentTimeMillis() / 1000)
+                            put(MediaStore.Video.Media.SIZE, staging.length())
                         }
-                        Log.i(TAG, "Recording successfully registered and finalized in Android MediaStore: $uri")
+                        context.contentResolver.update(uri, updateValues, null, null)
+                        Log.i(TAG, "Recording successfully registered and finalized with IS_PENDING=0 in Android MediaStore: $uri")
 
                         // Query resolved public file path from MediaStore
                         try {
@@ -368,34 +450,59 @@ class ScreenRecorderManager(
                                         val path = cursor.getString(colIdx)
                                         if (!path.isNullOrBlank()) {
                                             finalFilePath = path
-                                            val diskFile = File(path)
-                                            if (diskFile.exists()) {
-                                                finalFileSizeBytes = diskFile.length()
-                                            }
                                         }
                                     }
                                 }
                             }
                         } catch (e: Exception) {
-                            Log.d(TAG, "MediaStore path query note: ${e.message}")
+                            Log.d(TAG, "MediaStore DATA column query note: ${e.message}")
                         }
                     }
                 } catch (e: Exception) {
                     Log.w(TAG, "MediaStore insert warning: ${e.message}")
                 }
 
-                // Trigger MediaScannerConnection so the file is instantly indexed by Gallery & Google Photos
+                // 2. Also copy to public Movies/VIPER STUDIO directory if accessible
+                if (publicF != null) {
+                    try {
+                        publicF.parentFile?.mkdirs()
+                        FileInputStream(staging).use { input ->
+                            FileOutputStream(publicF).use { output ->
+                                input.copyTo(output)
+                                output.flush()
+                            }
+                        }
+                        if (finalFilePath.isBlank()) {
+                            finalFilePath = publicF.absolutePath
+                        }
+                        Log.i(TAG, "Direct copy to Movies/VIPER STUDIO succeeded: ${publicF.absolutePath}")
+                    } catch (e: Exception) {
+                        Log.d(TAG, "Direct copy to public Movies skipped (Scoped Storage): ${e.message}")
+                    }
+                }
+
+                if (finalFilePath.isBlank()) {
+                    finalFilePath = mediaStoreUri?.toString() ?: staging.absolutePath
+                }
+                finalFileSizeBytes = staging.length()
+
+                // 3. Trigger MediaScannerConnection so the file is instantly indexed by Gallery & Google Photos
                 try {
                     val pathsToScan = mutableListOf<String>()
-                    if (finalFilePath.isNotBlank()) pathsToScan.add(finalFilePath)
-                    if (publicF != null && publicF.exists()) pathsToScan.add(publicF.absolutePath)
+                    if (finalFilePath.isNotBlank() && !finalFilePath.startsWith("content://")) {
+                        pathsToScan.add(finalFilePath)
+                    }
+                    if (publicF != null && publicF.exists()) {
+                        pathsToScan.add(publicF.absolutePath)
+                    }
                     if (pathsToScan.isNotEmpty()) {
                         MediaScannerConnection.scanFile(
                             context,
                             pathsToScan.toTypedArray(),
-                            arrayOf("video/mp4"),
-                            null
-                        )
+                            arrayOf("video/mp4")
+                        ) { path, scannedUri ->
+                            Log.i(TAG, "MediaScanner indexed recording: $path -> $scannedUri")
+                        }
                     }
                 } catch (_: Exception) {}
 
@@ -428,8 +535,17 @@ class ScreenRecorderManager(
         synchronized(muxerLock) {
             try {
                 if (isMuxerStarted.get()) {
+                    if (audioTrackIndex != -1 && recordedAudioFramesCount.get() == 0L) {
+                        try {
+                            val dummyAudio = ByteBuffer.allocate(7)
+                            val dummyInfo = MediaCodec.BufferInfo().apply {
+                                set(0, 0, 0L, 0)
+                            }
+                            mediaMuxer?.writeSampleData(audioTrackIndex, dummyAudio, dummyInfo)
+                        } catch (_: Exception) {}
+                    }
                     mediaMuxer?.stop()
-                    Log.i(TAG_MUXER, "MediaMuxer stopped cleanly.")
+                    Log.i(TAG_MUXER, "MediaMuxer stopped cleanly (video: ${recordedVideoFramesCount.get()}, audio: ${recordedAudioFramesCount.get()}).")
                 }
             } catch (e: Exception) {
                 Log.w(TAG_MUXER, "MediaMuxer stop warning (frames recorded: video=${recordedVideoFramesCount.get()}, audio=${recordedAudioFramesCount.get()}): ${e.message}")
@@ -441,6 +557,8 @@ class ScreenRecorderManager(
                 isMuxerStarted.set(false)
                 videoTrackIndex = -1
                 audioTrackIndex = -1
+                videoFormatAddedTimestampMs = 0L
+                pendingSamplesQueue.clear()
             }
         }
     }
@@ -514,17 +632,27 @@ class ScreenRecorderManager(
     fun deleteRecording(recordingId: Long, filePath: String) {
         scope.launch {
             try {
-                val f = File(filePath)
-                if (f.exists()) f.delete()
+                if (filePath.startsWith("content://")) {
+                    context.contentResolver.delete(Uri.parse(filePath), null, null)
+                } else {
+                    val f = File(filePath)
+                    if (f.exists()) f.delete()
+                    val fileName = f.name
+                    context.contentResolver.delete(
+                        MediaStore.Video.Media.EXTERNAL_CONTENT_URI,
+                        "${MediaStore.Video.Media.DISPLAY_NAME} = ?",
+                        arrayOf(fileName)
+                    )
+                }
             } catch (_: Exception) {}
 
             try {
-                val fileName = File(filePath).name
-                context.contentResolver.delete(
-                    MediaStore.Video.Media.EXTERNAL_CONTENT_URI,
-                    "${MediaStore.Video.Media.DISPLAY_NAME} = ?",
-                    arrayOf(fileName)
-                )
+                val fileName = if (filePath.startsWith("content://")) "" else File(filePath).name
+                if (fileName.isNotBlank()) {
+                    val stagingDir = context.getExternalFilesDir("recordings")
+                    val stagingF = if (stagingDir != null) File(stagingDir, fileName) else null
+                    if (stagingF?.exists() == true) stagingF.delete()
+                }
             } catch (_: Exception) {}
 
             database.recordingDao().deleteById(recordingId)

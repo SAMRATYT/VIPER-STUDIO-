@@ -1,7 +1,9 @@
 package com.example.ui.screens
 
+import android.content.ContentUris
 import android.content.Intent
 import android.net.Uri
+import android.provider.MediaStore
 import android.widget.Toast
 import androidx.compose.animation.AnimatedVisibility
 import androidx.compose.animation.core.RepeatMode
@@ -541,18 +543,47 @@ fun RecorderScreen(
     }
 }
 
+private fun resolvePlayableUri(context: android.content.Context, filePath: String): Uri {
+    if (filePath.startsWith("content://")) {
+        return Uri.parse(filePath)
+    }
+    val file = File(filePath)
+    if (file.exists()) {
+        try {
+            return FileProvider.getUriForFile(context, "${context.packageName}.provider", file)
+        } catch (_: Exception) {}
+    }
+    // Query MediaStore by filename
+    try {
+        val cursor = context.contentResolver.query(
+            MediaStore.Video.Media.EXTERNAL_CONTENT_URI,
+            arrayOf(MediaStore.Video.Media._ID),
+            "${MediaStore.Video.Media.DISPLAY_NAME} = ?",
+            arrayOf(file.name),
+            null
+        )
+        cursor?.use {
+            if (it.moveToFirst()) {
+                val id = it.getLong(it.getColumnIndexOrThrow(MediaStore.Video.Media._ID))
+                return ContentUris.withAppendedId(MediaStore.Video.Media.EXTERNAL_CONTENT_URI, id)
+            }
+        }
+    } catch (_: Exception) {}
+
+    // Check staging recordings directory in app external storage
+    try {
+        val staging = File(context.getExternalFilesDir("recordings"), file.name)
+        if (staging.exists()) {
+            return FileProvider.getUriForFile(context, "${context.packageName}.provider", staging)
+        }
+    } catch (_: Exception) {}
+
+    return if (file.exists()) Uri.fromFile(file) else Uri.parse(filePath)
+}
+
 private fun playRecordingFile(context: android.content.Context, filePath: String) {
     try {
-        val file = File(filePath)
-        val uri = if (file.exists()) {
-            try {
-                FileProvider.getUriForFile(context, "${context.packageName}.provider", file)
-            } catch (_: Exception) {
-                Uri.fromFile(file)
-            }
-        } else {
-            Uri.parse(filePath)
-        }
+        val uri = resolvePlayableUri(context, filePath)
         val intent = Intent(Intent.ACTION_VIEW).apply {
             setDataAndType(uri, "video/mp4")
             addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION or Intent.FLAG_ACTIVITY_NEW_TASK)
@@ -565,12 +596,7 @@ private fun playRecordingFile(context: android.content.Context, filePath: String
 
 private fun shareRecordingFile(context: android.content.Context, filePath: String) {
     try {
-        val file = File(filePath)
-        val uri = try {
-            FileProvider.getUriForFile(context, "${context.packageName}.provider", file)
-        } catch (_: Exception) {
-            Uri.fromFile(file)
-        }
+        val uri = resolvePlayableUri(context, filePath)
         val shareIntent = Intent(Intent.ACTION_SEND).apply {
             type = "video/mp4"
             putExtra(Intent.EXTRA_STREAM, uri)

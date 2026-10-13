@@ -31,6 +31,16 @@ class ExampleRobolectricTest {
     }
 
     @Test
+    fun `test default_web_client_id is accessible and valid`() {
+        val context = ApplicationProvider.getApplicationContext<Context>()
+        val resId = context.resources.getIdentifier("default_web_client_id", "string", context.packageName)
+        assertTrue("default_web_client_id should be present in resources", resId != 0)
+        val clientId = context.getString(resId)
+        assertTrue("Client ID must be valid Google Web Client ID", clientId.endsWith(".apps.googleusercontent.com"))
+        assertEquals("227479609974-3m9hai28r18n12tkthp9qjmosc5cvn9c.apps.googleusercontent.com", clientId)
+    }
+
+    @Test
     fun `test rtmp stream engine validation prevents empty key crash`() {
         val context = ApplicationProvider.getApplicationContext<Context>()
         val rtmpEngine = RtmpStreamEngine(context)
@@ -187,6 +197,23 @@ class ExampleRobolectricTest {
         recorder.updateAvailableStorage()
         assertTrue("Available storage should be reported", recorder.availableStorageGb.value >= 0f)
         assertFalse("Recorder should not be recording initially", recorder.isRecording.value)
+    }
+
+    @Test
+    fun `test screen recorder manager lifecycle and mediastore finalization`() {
+        val app = ApplicationProvider.getApplicationContext<ViperStudioApplication>()
+        val recorder = app.screenRecorderManager
+        recorder.startRecording(ResolutionOption.RES_1080P, isLandscape = true)
+        assertTrue("Recording should be active", recorder.isRecording.value)
+
+        recorder.pauseRecording()
+        assertTrue("Recording should be paused", recorder.isPaused.value)
+
+        recorder.resumeRecording()
+        assertFalse("Recording should be resumed", recorder.isPaused.value)
+
+        recorder.stopRecording()
+        assertFalse("Recording should be stopped", recorder.isRecording.value)
     }
 
     @Test
