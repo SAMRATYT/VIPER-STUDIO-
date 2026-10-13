@@ -30,7 +30,16 @@ class ViperStudioApplication : Application() {
 
     override fun onCreate() {
         super.onCreate()
+        setupUncaughtExceptionHandler()
         seedDefaultScenesIfEmpty()
+    }
+
+    private fun setupUncaughtExceptionHandler() {
+        val defaultHandler = Thread.getDefaultUncaughtExceptionHandler()
+        Thread.setDefaultUncaughtExceptionHandler { thread, throwable ->
+            android.util.Log.e("ViperStudioApp", "FATAL CRASH on thread ${thread.name}: ${throwable.message}", throwable)
+            defaultHandler?.uncaughtException(thread, throwable)
+        }
     }
 
     private fun seedDefaultScenesIfEmpty() {

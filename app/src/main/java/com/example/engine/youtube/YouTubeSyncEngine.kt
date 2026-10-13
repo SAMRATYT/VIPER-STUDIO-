@@ -52,7 +52,14 @@ class YouTubeSyncEngine(private val context: Context) {
 
     private val scope = CoroutineScope(Dispatchers.IO)
     private val prefsRepo = AppPreferencesRepository(context)
-    private val firebaseAuth: FirebaseAuth = FirebaseAuth.getInstance()
+    private val firebaseAuth: FirebaseAuth? by lazy {
+        try {
+            FirebaseAuth.getInstance()
+        } catch (e: Throwable) {
+            Log.w(TAG, "FirebaseAuth initialization warning: ${e.message}")
+            null
+        }
+    }
 
     private val httpClient = OkHttpClient.Builder()
         .connectTimeout(15, TimeUnit.SECONDS)
@@ -75,7 +82,7 @@ class YouTubeSyncEngine(private val context: Context) {
 
     init {
         // Sync with Firebase user state if present
-        val currentUser = firebaseAuth.currentUser
+        val currentUser = firebaseAuth?.currentUser
         if (currentUser != null && !_channelInfo.value.isConnected) {
             val email = currentUser.email ?: ""
             val name = currentUser.displayName ?: email.substringBefore("@")
@@ -120,7 +127,7 @@ class YouTubeSyncEngine(private val context: Context) {
                 if (forceSwitchAccount) {
                     try {
                         credentialManager.clearCredentialState(ClearCredentialStateRequest())
-                        firebaseAuth.signOut()
+                        firebaseAuth?.signOut()
                     } catch (e: Exception) {
                         Log.d(TAG, "Clear credential state ignored: ${e.message}")
                     }
@@ -157,7 +164,7 @@ class YouTubeSyncEngine(private val context: Context) {
                     // Authenticate with Firebase Authentication
                     val firebaseResult = try {
                         val authCred = GoogleAuthProvider.getCredential(idToken, null)
-                        firebaseAuth.signInWithCredential(authCred).await()
+                        firebaseAuth?.signInWithCredential(authCred)?.await()
                     } catch (fbEx: Throwable) {
                         Log.w(TAG, "Firebase auth with idToken note: ${fbEx.message}")
                         null
@@ -241,7 +248,7 @@ class YouTubeSyncEngine(private val context: Context) {
                 var realStreamKey = current.streamKey
 
                 // Attempt live query to YouTube Data API v3 if OAuth access token is set or available
-                val currentUser = firebaseAuth.currentUser
+                val currentUser = firebaseAuth?.currentUser
                 if (currentUser != null) {
                     val tokenResult = try {
                         currentUser.getIdToken(false).await()
@@ -328,7 +335,7 @@ class YouTubeSyncEngine(private val context: Context) {
             }
 
             try {
-                firebaseAuth.signOut()
+                firebaseAuth?.signOut()
             } catch (e: Exception) {
                 Log.w(TAG, "Firebase signOut error: ${e.message}")
             }
