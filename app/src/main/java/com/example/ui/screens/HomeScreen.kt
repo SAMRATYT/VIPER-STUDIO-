@@ -227,6 +227,30 @@ fun HomeScreen(
                     }
                 }
 
+                if (authError != null) {
+                    Card(
+                        modifier = Modifier.fillMaxWidth(),
+                        colors = CardDefaults.cardColors(containerColor = Color(0xFF33141E)),
+                        shape = RoundedCornerShape(8.dp)
+                    ) {
+                        Row(
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .padding(10.dp),
+                            horizontalArrangement = Arrangement.SpaceBetween,
+                            verticalAlignment = Alignment.CenterVertically
+                        ) {
+                            Column(modifier = Modifier.weight(1f)) {
+                                Text("AUTHENTICATION NOTICE", fontSize = 10.sp, fontWeight = FontWeight.Bold, color = Color(0xFFFF5252))
+                                Text(authError ?: "", fontSize = 11.sp, color = TextPrimary)
+                            }
+                            IconButton(onClick = { viewModel.clearAuthError() }) {
+                                Text("✕", color = Color.White, fontWeight = FontWeight.Bold, fontSize = 14.sp)
+                            }
+                        }
+                    }
+                }
+
                 if (!youTubeChannelInfo.isConnected) {
                     Text(
                         text = "Sign in with Google to select your Gmail account and connect YouTube broadcasts.",
