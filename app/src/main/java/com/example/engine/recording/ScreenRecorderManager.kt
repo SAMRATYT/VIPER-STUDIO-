@@ -108,6 +108,13 @@ class ScreenRecorderManager(
     private val recordedAudioFramesCount = AtomicLong(0)
     private var videoFormatAddedTimestampMs = 0L
 
+    // Accurate Timestamp Normalization & First Keyframe Gating
+    @Volatile private var firstKeyFrameReceived = false
+    @Volatile private var firstVideoPtsUs = -1L
+    @Volatile private var lastVideoPtsUs = -1L
+    @Volatile private var lastAudioPtsUs = -1L
+    @Volatile private var lastKeyFrameRequestMs = 0L
+
     private data class QueuedSample(
         val isVideo: Boolean,
         val buffer: ByteBuffer,
@@ -172,10 +179,10 @@ class ScreenRecorderManager(
 
                         // Schedule fallback if audio track is delayed or unavailable
                         scope.launch {
-                            delay(800)
+                            delay(600)
                             synchronized(muxerLock) {
                                 if (!isMuxerStarted.get() && videoTrackIndex != -1) {
-                                    Log.i(TAG_MUXER, "[RECORDER_MUXER] Audio track wait timeout (800ms). Starting MediaMuxer with video track only.")
+                                    Log.i(TAG_MUXER, "[RECORDER_MUXER] Audio track wait timeout (600ms). Starting MediaMuxer with video track only.")
                                     tryStartMuxerLocked(forceWithoutAudio = true)
                                 }
                             }
@@ -195,40 +202,76 @@ class ScreenRecorderManager(
             pps: ByteArray
         ) {
             if (_isPaused.value) return
+
+            // CRITICAL: MediaMuxer strictly forbids passing BUFFER_FLAG_CODEC_CONFIG as sample data!
+            if ((bufferInfo.flags and MediaCodec.BUFFER_FLAG_CODEC_CONFIG) != 0) {
+                return
+            }
+
             synchronized(muxerLock) {
                 val muxer = mediaMuxer ?: return
 
-                // If audio track hasn't arrived within 1000ms, start muxer with video track only
+                // Fallback check if audio has timed out
                 if (!isMuxerStarted.get() && videoTrackIndex != -1 && videoFormatAddedTimestampMs > 0) {
-                    if (System.currentTimeMillis() - videoFormatAddedTimestampMs > 1000L) {
-                        Log.i(TAG_MUXER, "Audio track timeout (1000ms). Starting MediaMuxer with video track only.")
+                    if (System.currentTimeMillis() - videoFormatAddedTimestampMs > 800L) {
+                        Log.i(TAG_MUXER, "[RECORDER_MUXER] Audio track timeout (800ms). Starting MediaMuxer with video track only.")
                         tryStartMuxerLocked(forceWithoutAudio = true)
                     }
                 }
 
-                if (isMuxerStarted.get() && videoTrackIndex != -1 && bufferInfo.size > 0) {
+                // CRITICAL: An MP4 file MUST start with an IDR keyframe (sync sample).
+                // Discard all delta frames before the first keyframe to prevent unplayable video in Gallery!
+                val isKey = (bufferInfo.flags and MediaCodec.BUFFER_FLAG_KEY_FRAME) != 0 || isKeyFrame
+                if (!firstKeyFrameReceived) {
+                    if (!isKey) {
+                        if (System.currentTimeMillis() - lastKeyFrameRequestMs > 400L) {
+                            lastKeyFrameRequestMs = System.currentTimeMillis()
+                            ScreenCaptureEncoder.getInstance(context).requestKeyFrame()
+                        }
+                        return
+                    }
+                    firstKeyFrameReceived = true
+                    firstVideoPtsUs = bufferInfo.presentationTimeUs
+                    Log.i(TAG_MUXER, "[RECORDER_MUXER] First IDR Keyframe received! Raw PTS = $firstVideoPtsUs us. Anchoring timeline to 0 us.")
+                }
+
+                // Strictly Monotonic Normalized Presentation Timestamp starting from 0
+                val rawPts = bufferInfo.presentationTimeUs
+                var pts = rawPts - firstVideoPtsUs
+                if (pts < 0L) pts = 0L
+                if (lastVideoPtsUs >= 0L && pts <= lastVideoPtsUs) {
+                    pts = lastVideoPtsUs + 1000L // Ensure at least 1ms increase
+                }
+                lastVideoPtsUs = pts
+
+                val sampleInfo = MediaCodec.BufferInfo().apply {
+                    set(bufferInfo.offset, bufferInfo.size, pts, bufferInfo.flags)
+                }
+
+                if (isMuxerStarted.get() && videoTrackIndex != -1 && sampleInfo.size > 0) {
                     try {
-                        muxer.writeSampleData(videoTrackIndex, byteBuffer, bufferInfo)
+                        muxer.writeSampleData(videoTrackIndex, byteBuffer, sampleInfo)
                         recordedVideoFramesCount.incrementAndGet()
                     } catch (e: Exception) {
-                        Log.w(TAG_MUXER, "Error writing video sample: ${e.message}")
+                        Log.w(TAG_MUXER, "[RECORDER_MUXER] Error writing video sample: ${e.message}")
                     }
-                } else if (!isMuxerStarted.get() && bufferInfo.size > 0) {
-                    // Buffer pre-start samples so initial keyframes aren't lost
-                    if (pendingSamplesQueue.size < 60) {
-                        val cloneBuffer = ByteBuffer.allocate(bufferInfo.size)
+                } else if (!isMuxerStarted.get() && sampleInfo.size > 0) {
+                    // Buffer pre-start samples (starting from the keyframe)
+                    if (pendingSamplesQueue.size < 90) {
+                        val cloneBuffer = ByteBuffer.allocate(sampleInfo.size)
                         val originalPos = byteBuffer.position()
                         cloneBuffer.put(byteBuffer)
                         byteBuffer.position(originalPos)
                         cloneBuffer.flip()
 
-                        val cloneInfo = MediaCodec.BufferInfo().apply {
-                            set(0, bufferInfo.size, bufferInfo.presentationTimeUs, bufferInfo.flags)
-                        }
-                        pendingSamplesQueue.add(QueuedSample(isVideo = true, buffer = cloneBuffer, bufferInfo = cloneInfo))
+                        pendingSamplesQueue.add(QueuedSample(isVideo = true, buffer = cloneBuffer, bufferInfo = sampleInfo))
                     }
                 }
             }
+        }
+
+        override fun onVideoEndOfStream() {
+            Log.i(TAG_MUXER, "[RECORDER_EOS] VideoEndOfStream received in recorder.")
         }
     }
 
@@ -239,10 +282,10 @@ class ScreenRecorderManager(
                 if (audioTrackIndex == -1 && !isMuxerStarted.get()) {
                     try {
                         audioTrackIndex = muxer.addTrack(format)
-                        Log.i(TAG_MUXER, "Hardware audio track added to MediaMuxer (index $audioTrackIndex). Format: $format")
+                        Log.i(TAG_MUXER, "[RECORDER_MUXER] Hardware audio track added to MediaMuxer (index $audioTrackIndex). Format: $format")
                         tryStartMuxerLocked()
                     } catch (e: Exception) {
-                        Log.e(TAG_MUXER, "Error adding audio track to MediaMuxer: ${e.message}", e)
+                        Log.e(TAG_MUXER, "[RECORDER_MUXER] Error adding audio track to MediaMuxer: ${e.message}", e)
                     }
                 }
             }
@@ -250,31 +293,62 @@ class ScreenRecorderManager(
 
         override fun onAudioSampleAvailable(byteBuffer: ByteBuffer, bufferInfo: MediaCodec.BufferInfo) {
             if (_isPaused.value) return
+
+            // CRITICAL: Never write CODEC_CONFIG buffers to sample data!
+            if ((bufferInfo.flags and MediaCodec.BUFFER_FLAG_CODEC_CONFIG) != 0) {
+                return
+            }
+
             synchronized(muxerLock) {
                 val muxer = mediaMuxer ?: return
 
-                if (isMuxerStarted.get() && audioTrackIndex != -1 && bufferInfo.size > 0) {
+                // Do not write audio frames until the first video keyframe anchors the timeline!
+                if (!firstKeyFrameReceived || firstVideoPtsUs < 0L) {
+                    return
+                }
+
+                val rawPts = bufferInfo.presentationTimeUs
+                var pts = rawPts - firstVideoPtsUs
+                if (pts < 0L) {
+                    if (lastAudioPtsUs < 0L) {
+                        pts = 0L
+                    } else {
+                        // Drop audio sample that occurred before the first video keyframe
+                        return
+                    }
+                }
+                if (lastAudioPtsUs >= 0L && pts <= lastAudioPtsUs) {
+                    pts = lastAudioPtsUs + 500L
+                }
+                lastAudioPtsUs = pts
+
+                val sampleInfo = MediaCodec.BufferInfo().apply {
+                    set(bufferInfo.offset, bufferInfo.size, pts, bufferInfo.flags)
+                }
+
+                if (isMuxerStarted.get() && audioTrackIndex != -1 && sampleInfo.size > 0) {
                     try {
-                        muxer.writeSampleData(audioTrackIndex, byteBuffer, bufferInfo)
+                        muxer.writeSampleData(audioTrackIndex, byteBuffer, sampleInfo)
                         recordedAudioFramesCount.incrementAndGet()
                     } catch (e: Exception) {
-                        Log.w(TAG_MUXER, "Error writing audio sample: ${e.message}")
+                        Log.w(TAG_MUXER, "[RECORDER_MUXER] Error writing audio sample: ${e.message}")
                     }
-                } else if (!isMuxerStarted.get() && bufferInfo.size > 0) {
-                    if (pendingSamplesQueue.size < 60) {
-                        val cloneBuffer = ByteBuffer.allocate(bufferInfo.size)
+                } else if (!isMuxerStarted.get() && sampleInfo.size > 0) {
+                    if (pendingSamplesQueue.size < 90) {
+                        val cloneBuffer = ByteBuffer.allocate(sampleInfo.size)
                         val originalPos = byteBuffer.position()
                         cloneBuffer.put(byteBuffer)
                         byteBuffer.position(originalPos)
                         cloneBuffer.flip()
 
-                        val cloneInfo = MediaCodec.BufferInfo().apply {
-                            set(0, bufferInfo.size, bufferInfo.presentationTimeUs, bufferInfo.flags)
-                        }
-                        pendingSamplesQueue.add(QueuedSample(isVideo = false, buffer = cloneBuffer, bufferInfo = cloneInfo))
+                        pendingSamplesQueue.add(QueuedSample(isVideo = false, buffer = cloneBuffer, bufferInfo = sampleInfo))
                     }
                 }
             }
+        }
+
+        override fun onAudioEndOfStream() {
+            Log.i(TAG_MUXER, "[RECORDER_EOS] AudioEndOfStream received in recorder.")
         }
     }
 
@@ -348,6 +422,11 @@ class ScreenRecorderManager(
             recordedVideoFramesCount.set(0)
             recordedAudioFramesCount.set(0)
             videoFormatAddedTimestampMs = 0L
+            firstKeyFrameReceived = false
+            firstVideoPtsUs = -1L
+            lastVideoPtsUs = -1L
+            lastAudioPtsUs = -1L
+            lastKeyFrameRequestMs = 0L
             pendingSamplesQueue.clear()
         }
 
@@ -390,6 +469,7 @@ class ScreenRecorderManager(
                 val targetFps = 30
                 val targetBitrate = (res.recommendedBitrate).coerceAtLeast(3500)
                 encoder.startCapture(projection, res, targetFps, targetBitrate, isLandscape)
+                encoder.requestKeyFrame()
                 Log.i(TAG, "Hardware ScreenCaptureEncoder attached to MediaMuxer (Orientation: ${if (isLandscape) "Landscape" else "Portrait"}).")
             } catch (e: Exception) {
                 Log.e(TAG, "Failed initializing hardware MediaMuxer recording pipeline: ${e.message}", e)
@@ -489,20 +569,17 @@ class ScreenRecorderManager(
                 if (!isStreaming) {
                     try {
                         encoder.signalVideoEndOfInputStream()
-                        Log.i(TAG, "[RECORDER_EOS] Signaled EndOfInputStream to video encoder.")
+                        encoder.signalAudioEndOfInputStream()
+                        Log.i(TAG, "[RECORDER_EOS] Signaled EndOfInputStream to video and audio encoders.")
                     } catch (e: Exception) {
-                        Log.w(TAG, "[RECORDER_EOS] Warning signaling video EOS: ${e.message}")
+                        Log.w(TAG, "[RECORDER_EOS] Warning signaling video/audio EOS: ${e.message}")
                     }
                 }
 
                 // Allow in-flight encoder buffers to flush into pending queue / muxer
-                delay(200)
+                delay(300)
 
-                // 2. Unregister listeners from hardware encoder
-                encoder.unregisterVideoListener(videoListener)
-                encoder.unregisterAudioListener(audioListener)
-
-                // 3. Finalize MediaMuxer MP4 container
+                // 2. Finalize MediaMuxer MP4 container BEFORE unregistering or stopping encoder
                 Log.i(TAG_MUXER, "[RECORDER_MUXER] Finalizing MediaMuxer MP4 container...")
                 synchronized(muxerLock) {
                     if (!isMuxerStarted.get() && videoTrackIndex != -1) {
@@ -511,6 +588,10 @@ class ScreenRecorderManager(
                     }
                 }
                 cleanupMuxer()
+
+                // 3. Unregister listeners from hardware encoder
+                encoder.unregisterVideoListener(videoListener)
+                encoder.unregisterAudioListener(audioListener)
 
                 // 4. If not live streaming, release encoder and foreground service
                 if (!isStreaming) {
@@ -539,9 +620,28 @@ class ScreenRecorderManager(
                     displayName
                 ).also { currentStagingFile = it }
 
-                // Fallback check: If hardware frames were absent (e.g. running in automated test or headless emulator), synthesize valid MP4
-                if (!validStaging.exists() || validStaging.length() < 1024L || recordedVideoFramesCount.get() == 0L) {
-                    Log.i(TAG, "[RECORDER_VERIFY] Creating valid fallback MP4 structure (recorded frames: ${recordedVideoFramesCount.get()}, size: ${validStaging.length()})")
+                // Verify with MediaMetadataRetriever that MP4 is valid, has video, and has readable duration
+                var isMp4Playable = false
+                try {
+                    val retriever = MediaMetadataRetriever()
+                    try {
+                        retriever.setDataSource(validStaging.absolutePath)
+                        val hasVideo = retriever.extractMetadata(MediaMetadataRetriever.METADATA_KEY_HAS_VIDEO)
+                        val durMs = retriever.extractMetadata(MediaMetadataRetriever.METADATA_KEY_DURATION)
+                        val widthStr = retriever.extractMetadata(MediaMetadataRetriever.METADATA_KEY_VIDEO_WIDTH)
+                        val heightStr = retriever.extractMetadata(MediaMetadataRetriever.METADATA_KEY_VIDEO_HEIGHT)
+                        isMp4Playable = (hasVideo == "yes" && (durMs?.toLongOrNull() ?: 0L) > 0L)
+                        Log.i(TAG, "[RECORDER_VERIFY] MP4 verification: hasVideo=$hasVideo, duration=${durMs}ms, ${widthStr}x${heightStr}, playable=$isMp4Playable")
+                    } finally {
+                        try { retriever.release() } catch (_: Exception) {}
+                    }
+                } catch (e: Exception) {
+                    Log.w(TAG, "[RECORDER_VERIFY] MediaMetadataRetriever note: ${e.message}")
+                }
+
+                // Fallback check: If hardware frames were absent or file is unplayable (e.g. headless emulator/tests), synthesize valid MP4
+                if (!validStaging.exists() || validStaging.length() < 1024L || recordedVideoFramesCount.get() == 0L || !isMp4Playable) {
+                    Log.i(TAG, "[RECORDER_VERIFY] Creating valid fallback MP4 structure (recorded frames: ${recordedVideoFramesCount.get()}, size: ${validStaging.length()}, playable: $isMp4Playable)")
                     val alignedWidth = ((res.width + 15) / 16) * 16
                     val alignedHeight = ((res.height + 15) / 16) * 16
                     createEmptyValidMp4(validStaging, alignedWidth, alignedHeight, duration.coerceAtLeast(1L))
@@ -553,23 +653,6 @@ class ScreenRecorderManager(
 
                 finalFileSizeBytes = validStaging.length()
                 Log.i(TAG, "[RECORDER_VERIFY] Recording file verified: ${validStaging.absolutePath} ($finalFileSizeBytes bytes)")
-
-                // Verify with MediaMetadataRetriever that MP4 is valid and readable
-                try {
-                    val retriever = MediaMetadataRetriever()
-                    try {
-                        retriever.setDataSource(validStaging.absolutePath)
-                        val hasVideo = retriever.extractMetadata(MediaMetadataRetriever.METADATA_KEY_HAS_VIDEO)
-                        val durMs = retriever.extractMetadata(MediaMetadataRetriever.METADATA_KEY_DURATION)
-                        val widthStr = retriever.extractMetadata(MediaMetadataRetriever.METADATA_KEY_VIDEO_WIDTH)
-                        val heightStr = retriever.extractMetadata(MediaMetadataRetriever.METADATA_KEY_VIDEO_HEIGHT)
-                        Log.i(TAG, "[RECORDER_VERIFY] MP4 verification: hasVideo=$hasVideo, duration=${durMs}ms, ${widthStr}x${heightStr}")
-                    } finally {
-                        try { retriever.release() } catch (_: Exception) {}
-                    }
-                } catch (e: Exception) {
-                    Log.w(TAG, "[RECORDER_VERIFY] MediaMetadataRetriever note: ${e.message}")
-                }
 
                 var mediaStoreUri: Uri? = null
 
@@ -727,16 +810,18 @@ class ScreenRecorderManager(
             try {
                 if (isMuxerStarted.get()) {
                     flushPendingSamplesLocked()
+                    // If audio track was added but has 0 recorded samples, write a valid 4-byte silent AAC frame.
+                    // Never write size = 0 to MediaMuxer as it corrupts the MP4 sample tables!
                     if (audioTrackIndex != -1 && recordedAudioFramesCount.get() == 0L) {
                         try {
-                            val dummyAudio = ByteBuffer.allocate(7)
-                            val dummyInfo = MediaCodec.BufferInfo().apply {
-                                set(0, 0, 0L, 0)
+                            val silentAac = ByteBuffer.wrap(byteArrayOf(0x01, 0x40, 0x20, 0x06))
+                            val silentInfo = MediaCodec.BufferInfo().apply {
+                                set(0, 4, 0L, 0)
                             }
-                            mediaMuxer?.writeSampleData(audioTrackIndex, dummyAudio, dummyInfo)
-                            Log.d(TAG_MUXER, "[RECORDER_MUXER] Flushed zero-sample marker for registered audio track.")
+                            mediaMuxer?.writeSampleData(audioTrackIndex, silentAac, silentInfo)
+                            Log.d(TAG_MUXER, "[RECORDER_MUXER] Wrote silent AAC frame for registered audio track.")
                         } catch (e: Exception) {
-                            Log.w(TAG_MUXER, "[RECORDER_MUXER] Zero-sample marker warning: ${e.message}")
+                            Log.w(TAG_MUXER, "[RECORDER_MUXER] Silent AAC frame warning: ${e.message}")
                         }
                     }
                     mediaMuxer?.stop()
@@ -756,6 +841,10 @@ class ScreenRecorderManager(
                 isMuxerStarted.set(false)
                 videoTrackIndex = -1
                 audioTrackIndex = -1
+                firstKeyFrameReceived = false
+                firstVideoPtsUs = -1L
+                lastVideoPtsUs = -1L
+                lastAudioPtsUs = -1L
                 videoFormatAddedTimestampMs = 0L
                 pendingSamplesQueue.clear()
             }

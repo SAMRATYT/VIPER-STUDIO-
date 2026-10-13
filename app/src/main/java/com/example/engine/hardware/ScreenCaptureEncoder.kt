@@ -18,6 +18,7 @@ import android.media.projection.MediaProjection
 import android.media.audiofx.AcousticEchoCanceler
 import android.media.audiofx.NoiseSuppressor
 import android.os.Build
+import android.os.Bundle
 import android.os.Handler
 import android.os.HandlerThread
 import android.os.Process
@@ -49,11 +50,13 @@ interface VideoFrameListener {
         sps: ByteArray,
         pps: ByteArray
     )
+    fun onVideoEndOfStream() {}
 }
 
 interface AudioFrameListener {
     fun onAudioFormatAvailable(format: MediaFormat, audioSpecificConfig: ByteArray)
     fun onAudioSampleAvailable(byteBuffer: ByteBuffer, bufferInfo: MediaCodec.BufferInfo)
+    fun onAudioEndOfStream() {}
 }
 
 /**
@@ -343,14 +346,17 @@ class ScreenCaptureEncoder(private val context: Context) : AudioRouteChangeListe
                 setFloat(MediaFormat.KEY_OPERATING_RATE, fpsVal.toFloat())
                 setInteger(MediaFormat.KEY_PRIORITY, 0)
                 setInteger(MediaFormat.KEY_I_FRAME_INTERVAL, 2) // 2-second keyframe interval required by YouTube
-                setInteger(MediaFormat.KEY_BITRATE_MODE, MediaCodecInfo.EncoderCapabilities.BITRATE_MODE_CBR)
+                try {
+                    setInteger(MediaFormat.KEY_BITRATE_MODE, MediaCodecInfo.EncoderCapabilities.BITRATE_MODE_VBR)
+                } catch (_: Exception) {}
 
                 val repeatUs = (1_000_000L / fpsVal).coerceAtLeast(16_666L)
                 setLong(MediaFormat.KEY_REPEAT_PREVIOUS_FRAME_AFTER, repeatUs)
 
                 if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M) {
-                    setInteger(MediaFormat.KEY_PROFILE, MediaCodecInfo.CodecProfileLevel.AVCProfileBaseline)
-                    setInteger(MediaFormat.KEY_LEVEL, MediaCodecInfo.CodecProfileLevel.AVCLevel4)
+                    try {
+                        setInteger(MediaFormat.KEY_PROFILE, MediaCodecInfo.CodecProfileLevel.AVCProfileBaseline)
+                    } catch (_: Exception) {}
                 }
             }
 
@@ -428,12 +434,13 @@ class ScreenCaptureEncoder(private val context: Context) : AudioRouteChangeListe
                                 currentSps = extractNaluBytes(csd0)
                                 currentPps = extractNaluBytes(csd1)
                                 Log.i(TAG_VIDEO, "Extracted hardware SPS (${currentSps.size} bytes) and PPS (${currentPps.size} bytes)")
-                                for (listener in videoListeners) {
-                                    listener.onVideoFormatAvailable(newFormat, currentSps, currentPps)
-                                }
+                            }
+                            for (listener in videoListeners) {
+                                listener.onVideoFormatAvailable(newFormat, currentSps, currentPps)
                             }
                         }
                         outputIndex >= 0 -> {
+                            val isEos = (bufferInfo.flags and MediaCodec.BUFFER_FLAG_END_OF_STREAM) != 0
                             val outputBuffer = codec.getOutputBuffer(outputIndex)
                             if (outputBuffer != null && bufferInfo.size > 0) {
                                 outputBuffer.position(bufferInfo.offset)
@@ -456,6 +463,12 @@ class ScreenCaptureEncoder(private val context: Context) : AudioRouteChangeListe
                                             currentPps
                                         )
                                     }
+                                }
+                            }
+                            if (isEos) {
+                                Log.i(TAG_VIDEO, "[RECORDER_EOS] Video encoder reached BUFFER_FLAG_END_OF_STREAM.")
+                                for (listener in videoListeners) {
+                                    listener.onVideoEndOfStream()
                                 }
                             }
                             codec.releaseOutputBuffer(outputIndex, false)
@@ -889,8 +902,10 @@ class ScreenCaptureEncoder(private val context: Context) : AudioRouteChangeListe
                             }
                         }
                         outIndex >= 0 -> {
+                            val isEos = (bufferInfo.flags and MediaCodec.BUFFER_FLAG_END_OF_STREAM) != 0
+                            val isConfig = (bufferInfo.flags and MediaCodec.BUFFER_FLAG_CODEC_CONFIG) != 0
                             val outBuf = codec.getOutputBuffer(outIndex)
-                            if (outBuf != null && bufferInfo.size > 0) {
+                            if (outBuf != null && !isConfig && bufferInfo.size > 0) {
                                 outBuf.position(bufferInfo.offset)
                                 outBuf.limit(bufferInfo.offset + bufferInfo.size)
 
@@ -898,6 +913,12 @@ class ScreenCaptureEncoder(private val context: Context) : AudioRouteChangeListe
                                     outBuf.position(bufferInfo.offset)
                                     outBuf.limit(bufferInfo.offset + bufferInfo.size)
                                     listener.onAudioSampleAvailable(outBuf, bufferInfo)
+                                }
+                            }
+                            if (isEos) {
+                                Log.i(TAG_AUDIO, "[RECORDER_EOS] Audio encoder reached BUFFER_FLAG_END_OF_STREAM.")
+                                for (listener in audioListeners) {
+                                    listener.onAudioEndOfStream()
                                 }
                             }
                             codec.releaseOutputBuffer(outIndex, false)
@@ -915,6 +936,22 @@ class ScreenCaptureEncoder(private val context: Context) : AudioRouteChangeListe
     }
 
     /**
+     * Requests an immediate IDR keyframe (sync frame) from the hardware video encoder.
+     * Essential for screen recording to ensure the MP4 video track begins with a valid keyframe.
+     */
+    fun requestKeyFrame() {
+        try {
+            val params = Bundle().apply {
+                putInt(MediaCodec.PARAMETER_KEY_REQUEST_SYNC_FRAME, 0)
+            }
+            videoCodec?.setParameters(params)
+            Log.i(TAG_VIDEO, "Successfully requested immediate IDR keyframe from hardware video encoder.")
+        } catch (e: Exception) {
+            Log.w(TAG_VIDEO, "requestKeyFrame warning: ${e.message}")
+        }
+    }
+
+    /**
      * Signals End-of-Stream to the video encoder without immediately tearing down
      * the pipeline, allowing remaining frames to be drained by active listeners.
      */
@@ -924,6 +961,32 @@ class ScreenCaptureEncoder(private val context: Context) : AudioRouteChangeListe
             Log.i(TAG_VIDEO, "Signaled EndOfInputStream to video MediaCodec.")
         } catch (e: Exception) {
             Log.w(TAG_VIDEO, "signalEndOfInputStream warning: ${e.message}")
+        }
+    }
+
+    /**
+     * Signals End-of-Stream to the audio encoder by queueing an empty buffer with
+     * BUFFER_FLAG_END_OF_STREAM, ensuring remaining audio buffers are drained.
+     */
+    fun signalAudioEndOfInputStream() {
+        try {
+            val codec = audioCodec ?: return
+            val inIndex = codec.dequeueInputBuffer(10000L)
+            if (inIndex >= 0) {
+                val baseUs = presentationTimeBaseUs.get()
+                val framesWritten = totalAudioFramesWritten.get()
+                val ptsUs = baseUs + ((framesWritten * 1_000_000L) / SAMPLE_RATE)
+                codec.queueInputBuffer(
+                    inIndex,
+                    0,
+                    0,
+                    ptsUs,
+                    MediaCodec.BUFFER_FLAG_END_OF_STREAM
+                )
+                Log.i(TAG_AUDIO, "Queued BUFFER_FLAG_END_OF_STREAM to audio MediaCodec.")
+            }
+        } catch (e: Exception) {
+            Log.w(TAG_AUDIO, "signalAudioEndOfInputStream warning: ${e.message}")
         }
     }
 
