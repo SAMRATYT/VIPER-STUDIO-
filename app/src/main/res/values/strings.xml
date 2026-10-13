@@ -1,3 +1,5 @@
 <resources>
     <string name="app_name">VIPER STUDIO</string>
+    <!-- Web Client ID from google-services.json for Google Sign-In with Credential Manager -->
+    <string name="default_web_client_id" translatable="false">227479609974-3m9hai28r18n12tkthp9qjmosc5cvn9c.apps.googleusercontent.com</string>
 </resources>
