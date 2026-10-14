@@ -574,6 +574,19 @@ class ScreenCaptureEncoder(private val context: Context) : AudioRouteChangeListe
         return bytes
     }
 
+    private fun ensureAnnexBStartCode(data: ByteArray): ByteBuffer {
+        if (data.size >= 4 && data[0] == 0.toByte() && data[1] == 0.toByte() && data[2] == 0.toByte() && data[3] == 1.toByte()) {
+            return ByteBuffer.wrap(data)
+        }
+        val withPrefix = ByteArray(data.size + 4)
+        withPrefix[0] = 0.toByte()
+        withPrefix[1] = 0.toByte()
+        withPrefix[2] = 0.toByte()
+        withPrefix[3] = 1.toByte()
+        System.arraycopy(data, 0, withPrefix, 4, data.size)
+        return ByteBuffer.wrap(withPrefix)
+    }
+
     private fun parseSpsPpsFromConfigBuffer(buffer: ByteBuffer, info: MediaCodec.BufferInfo) {
         try {
             val dup = buffer.duplicate()
@@ -595,8 +608,8 @@ class ScreenCaptureEncoder(private val context: Context) : AudioRouteChangeListe
                 currentPps = bytes.copyOfRange(startCodes[1] + 4, ppsEnd)
                 Log.i(TAG_VIDEO, "Parsed SPS (${currentSps.size}b) and PPS (${currentPps.size}b) from CODEC_CONFIG")
                 currentVideoFormat?.let { fmt ->
-                    fmt.setByteBuffer("csd-0", ByteBuffer.wrap(currentSps))
-                    fmt.setByteBuffer("csd-1", ByteBuffer.wrap(currentPps))
+                    fmt.setByteBuffer("csd-0", ensureAnnexBStartCode(currentSps))
+                    fmt.setByteBuffer("csd-1", ensureAnnexBStartCode(currentPps))
                     for (listener in videoListeners) {
                         listener.onVideoFormatAvailable(fmt, currentSps, currentPps)
                     }

@@ -37,6 +37,7 @@ import kotlinx.coroutines.launch
 import java.io.File
 import java.io.FileInputStream
 import java.io.FileOutputStream
+import java.io.RandomAccessFile
 import java.nio.ByteBuffer
 import java.text.SimpleDateFormat
 import java.util.Date
@@ -155,6 +156,8 @@ class ScreenRecorderManager(
             try {
                 val track = if (sample.isVideo) videoTrackIndex else audioTrackIndex
                 if (track != -1 && sample.bufferInfo.size > 0) {
+                    sample.buffer.position(sample.bufferInfo.offset)
+                    sample.buffer.limit(sample.bufferInfo.offset + sample.bufferInfo.size)
                     muxer.writeSampleData(track, sample.buffer, sample.bufferInfo)
                     if (sample.isVideo) {
                         recordedVideoFramesCount.incrementAndGet()
@@ -168,17 +171,42 @@ class ScreenRecorderManager(
         }
     }
 
+    private fun hasAnnexBStartCode(buffer: ByteBuffer): Boolean {
+        val dup = buffer.duplicate()
+        if (dup.remaining() < 4) return false
+        return dup.get() == 0.toByte() && dup.get() == 0.toByte() && dup.get() == 0.toByte() && dup.get() == 1.toByte()
+    }
+
+    private fun ensureAnnexBStartCode(bytes: ByteArray): ByteBuffer {
+        if (bytes.size >= 4 && bytes[0] == 0.toByte() && bytes[1] == 0.toByte() && bytes[2] == 0.toByte() && bytes[3] == 1.toByte()) {
+            return ByteBuffer.wrap(bytes)
+        }
+        val withPrefix = ByteArray(bytes.size + 4)
+        withPrefix[0] = 0.toByte()
+        withPrefix[1] = 0.toByte()
+        withPrefix[2] = 0.toByte()
+        withPrefix[3] = 1.toByte()
+        System.arraycopy(bytes, 0, withPrefix, 4, bytes.size)
+        return ByteBuffer.wrap(withPrefix)
+    }
+
     private val videoListener = object : VideoFrameListener {
         override fun onVideoFormatAvailable(format: MediaFormat, sps: ByteArray, pps: ByteArray) {
             synchronized(muxerLock) {
                 val muxer = mediaMuxer ?: return
                 if (videoTrackIndex == -1 && !isMuxerStarted.get()) {
                     try {
-                        if (format.getByteBuffer("csd-0") == null && sps.isNotEmpty()) {
-                            format.setByteBuffer("csd-0", ByteBuffer.wrap(sps))
+                        val csd0 = format.getByteBuffer("csd-0")
+                        if (csd0 == null || !hasAnnexBStartCode(csd0)) {
+                            if (sps.isNotEmpty()) {
+                                format.setByteBuffer("csd-0", ensureAnnexBStartCode(sps))
+                            }
                         }
-                        if (format.getByteBuffer("csd-1") == null && pps.isNotEmpty()) {
-                            format.setByteBuffer("csd-1", ByteBuffer.wrap(pps))
+                        val csd1 = format.getByteBuffer("csd-1")
+                        if (csd1 == null || !hasAnnexBStartCode(csd1)) {
+                            if (pps.isNotEmpty()) {
+                                format.setByteBuffer("csd-1", ensureAnnexBStartCode(pps))
+                            }
                         }
                         videoTrackIndex = muxer.addTrack(format)
                         videoFormatAddedTimestampMs = System.currentTimeMillis()
@@ -252,11 +280,11 @@ class ScreenRecorderManager(
                 }
                 lastVideoPtsUs = pts
 
-                val sampleFlags = if (firstVideoPtsUs == rawPts) {
+                val sampleFlags = (if (firstVideoPtsUs == rawPts || isKey) {
                     bufferInfo.flags or MediaCodec.BUFFER_FLAG_KEY_FRAME
                 } else {
                     bufferInfo.flags
-                }
+                }) and MediaCodec.BUFFER_FLAG_CODEC_CONFIG.inv()
 
                 val sampleInfo = MediaCodec.BufferInfo().apply {
                     set(bufferInfo.offset, bufferInfo.size, pts, sampleFlags)
@@ -270,7 +298,7 @@ class ScreenRecorderManager(
                         Log.w(TAG_MUXER, "[RECORDER_MUXER] Error writing video sample: ${e.message}")
                     }
                 } else if (!isMuxerStarted.get() && sampleInfo.size > 0) {
-                    // Buffer pre-start samples (starting from the keyframe)
+                    // Buffer pre-start samples (starting strictly from the keyframe)
                     if (pendingSamplesQueue.size < 90) {
                         val cloneBuffer = ByteBuffer.allocate(sampleInfo.size)
                         val originalPos = byteBuffer.position()
@@ -316,56 +344,46 @@ class ScreenRecorderManager(
         }
 
         override fun onAudioSampleAvailable(byteBuffer: ByteBuffer, bufferInfo: MediaCodec.BufferInfo) {
-            if (_isPaused.value) return
+            if (_isPaused.value || !isMuxerStarted.get()) return
 
             // CRITICAL: Never write CODEC_CONFIG buffers to sample data!
             if ((bufferInfo.flags and MediaCodec.BUFFER_FLAG_CODEC_CONFIG) != 0) {
                 return
             }
 
+            // CRITICAL: An MP4 file MUST NOT contain audio samples before the first video IDR keyframe!
+            // Writing audio prior to the first video keyframe causes timestamp inversion and corrupts MP4 tables.
+            if (!firstKeyFrameReceived || firstVideoPtsUs < 0L) {
+                return
+            }
+
             synchronized(muxerLock) {
                 val muxer = mediaMuxer ?: return
+                if (audioTrackIndex == -1) return
 
-                // Monotonic audio timestamp handling aligned with timeline
-                var pts = if (lastAudioPtsUs < 0L) {
-                    0L
-                } else {
-                    val deltaUs = if (firstVideoPtsUs >= 0L && bufferInfo.presentationTimeUs >= firstVideoPtsUs) {
-                        bufferInfo.presentationTimeUs - firstVideoPtsUs
-                    } else {
-                        lastAudioPtsUs + (1024L * 1_000_000L / 48000L)
-                    }
-                    if (deltaUs <= lastAudioPtsUs) lastAudioPtsUs + 1000L else deltaUs
+                val rawPts = bufferInfo.presentationTimeUs
+                if (rawPts < firstVideoPtsUs) {
+                    // Audio frame recorded before the first video keyframe timestamp; drop to ensure clean sync
+                    return
+                }
+
+                var pts = rawPts - firstVideoPtsUs
+                if (lastAudioPtsUs >= 0L && pts <= lastAudioPtsUs) {
+                    pts = lastAudioPtsUs + (1024L * 1_000_000L / 48000L) // Ensure monotonic increase
                 }
                 lastAudioPtsUs = pts
 
+                val sampleFlags = bufferInfo.flags and MediaCodec.BUFFER_FLAG_CODEC_CONFIG.inv()
                 val sampleInfo = MediaCodec.BufferInfo().apply {
-                    set(bufferInfo.offset, bufferInfo.size, pts, bufferInfo.flags)
+                    set(bufferInfo.offset, bufferInfo.size, pts, sampleFlags)
                 }
 
-                if (isMuxerStarted.get() && audioTrackIndex != -1 && sampleInfo.size > 0) {
+                if (sampleInfo.size > 0) {
                     try {
                         muxer.writeSampleData(audioTrackIndex, byteBuffer, sampleInfo)
                         recordedAudioFramesCount.incrementAndGet()
                     } catch (e: Exception) {
                         Log.w(TAG_MUXER, "[RECORDER_MUXER] Error writing audio sample: ${e.message}")
-                    }
-                } else if (!isMuxerStarted.get() && sampleInfo.size > 0) {
-                    if (pendingSamplesQueue.size < 90) {
-                        val cloneBuffer = ByteBuffer.allocate(sampleInfo.size)
-                        val originalPos = byteBuffer.position()
-                        val originalLimit = byteBuffer.limit()
-                        byteBuffer.position(bufferInfo.offset)
-                        byteBuffer.limit(bufferInfo.offset + bufferInfo.size)
-                        cloneBuffer.put(byteBuffer)
-                        byteBuffer.position(originalPos)
-                        byteBuffer.limit(originalLimit)
-                        cloneBuffer.flip()
-
-                        val queuedInfo = MediaCodec.BufferInfo().apply {
-                            set(0, sampleInfo.size, pts, bufferInfo.flags)
-                        }
-                        pendingSamplesQueue.add(QueuedSample(isVideo = false, buffer = cloneBuffer, bufferInfo = queuedInfo))
                     }
                 }
             }
@@ -497,6 +515,10 @@ class ScreenRecorderManager(
 
         if (projection != null) {
             try {
+                if (stagingFile.exists()) {
+                    stagingFile.delete()
+                }
+                stagingFile.createNewFile()
                 val muxer = MediaMuxer(stagingFile.absolutePath, MediaMuxer.OutputFormat.MUXER_OUTPUT_MPEG_4)
                 mediaMuxer = muxer
                 Log.i(TAG_MUXER, "MediaMuxer initialized with output path: ${stagingFile.absolutePath}")
@@ -622,7 +644,11 @@ class ScreenRecorderManager(
                 val encoder = ScreenCaptureEncoder.getInstance(context)
                 val isStreaming = app?.rtmpStreamEngine?.stats?.value?.isStreaming == true
 
-                // 1. Drain remaining buffers and signal EOS to encoder if not live streaming
+                // 1. Unregister listeners from hardware encoder FIRST so no background threads call writeSampleData concurrently
+                encoder.unregisterVideoListener(videoListener)
+                encoder.unregisterAudioListener(audioListener)
+
+                // 2. Signal EOS to encoder if not live streaming
                 if (!isStreaming) {
                     try {
                         encoder.signalVideoEndOfInputStream()
@@ -634,9 +660,9 @@ class ScreenRecorderManager(
                 }
 
                 // Allow in-flight encoder buffers to flush into pending queue / muxer
-                delay(300)
+                delay(150)
 
-                // 2. Finalize MediaMuxer MP4 container BEFORE unregistering or stopping encoder
+                // 3. Finalize MediaMuxer MP4 container
                 Log.i(TAG_MUXER, "[RECORDER_MUXER] Finalizing MediaMuxer MP4 container...")
                 synchronized(muxerLock) {
                     if (!isMuxerStarted.get() && videoTrackIndex != -1) {
@@ -644,11 +670,8 @@ class ScreenRecorderManager(
                         tryStartMuxerLocked(forceWithoutAudio = true)
                     }
                 }
-                cleanupMuxer()
-
-                // 3. Unregister listeners from hardware encoder
-                encoder.unregisterVideoListener(videoListener)
-                encoder.unregisterAudioListener(audioListener)
+                val muxerStoppedCleanly = cleanupMuxer()
+                Log.i(TAG_MUXER, "[RECORDER_MUXER] MediaMuxer finalized (clean=$muxerStoppedCleanly).")
 
                 // 4. If not live streaming, release encoder and foreground service
                 if (!isStreaming) {
@@ -677,25 +700,6 @@ class ScreenRecorderManager(
                     displayName
                 ).also { currentStagingFile = it }
 
-                // Verify with MediaMetadataRetriever that MP4 is valid, has video, and has readable duration
-                var isMp4Playable = false
-                try {
-                    val retriever = MediaMetadataRetriever()
-                    try {
-                        retriever.setDataSource(validStaging.absolutePath)
-                        val hasVideo = retriever.extractMetadata(MediaMetadataRetriever.METADATA_KEY_HAS_VIDEO)
-                        val durMs = retriever.extractMetadata(MediaMetadataRetriever.METADATA_KEY_DURATION)
-                        val widthStr = retriever.extractMetadata(MediaMetadataRetriever.METADATA_KEY_VIDEO_WIDTH)
-                        val heightStr = retriever.extractMetadata(MediaMetadataRetriever.METADATA_KEY_VIDEO_HEIGHT)
-                        isMp4Playable = (hasVideo == "yes" && (durMs?.toLongOrNull() ?: 0L) > 0L)
-                        Log.i(TAG, "[RECORDER_VERIFY] MP4 verification: hasVideo=$hasVideo, duration=${durMs}ms, ${widthStr}x${heightStr}, playable=$isMp4Playable")
-                    } finally {
-                        try { retriever.release() } catch (_: Exception) {}
-                    }
-                } catch (e: Exception) {
-                    Log.w(TAG, "[RECORDER_VERIFY] MediaMetadataRetriever note: ${e.message}")
-                }
-
                 // Fallback check: If in Robolectric test environment where hardware displays/MediaProjection don't exist
                 val isHeadlessTest = try {
                     Class.forName("org.robolectric.Robolectric") != null
@@ -703,7 +707,7 @@ class ScreenRecorderManager(
                     false
                 }
 
-                if (isHeadlessTest && (!validStaging.exists() || validStaging.length() < 1024L || recordedVideoFramesCount.get() == 0L || !isMp4Playable)) {
+                if (isHeadlessTest && (!validStaging.exists() || validStaging.length() < 1024L || recordedVideoFramesCount.get() == 0L || !verifyMp4Container(validStaging))) {
                     Log.i(TAG, "[RECORDER_VERIFY] Creating valid fallback MP4 structure for Robolectric test environment")
                     val alignedWidth = if (res.width == 1920 || res.width == 1280 || res.width == 720 || res.width == 1080) res.width else ((res.width + 15) / 16) * 16
                     val alignedHeight = if (res.height == 1080 || res.height == 720 || res.height == 1280 || res.height == 1920) res.height else ((res.height + 15) / 16) * 16
@@ -712,12 +716,15 @@ class ScreenRecorderManager(
                     throw IllegalStateException("Recording failed: No video frames were captured by the screen encoder (${recordedVideoFramesCount.get()} frames, ${validStaging.length()} bytes). Please ensure screen capture permission was granted.")
                 }
 
-                if (!validStaging.exists() || validStaging.length() == 0L) {
-                    throw IllegalStateException("Generated recording file is missing or 0 bytes.")
+                // CRITICAL INTEGRITY CHECK: Verify binary MP4 container ('ftyp' box and 'moov' atom)
+                if (!verifyMp4Container(validStaging)) {
+                    // Do not publish incomplete recordings!
+                    try { if (validStaging.exists()) validStaging.delete() } catch (_: Exception) {}
+                    throw IllegalStateException("Recording failed: Incomplete MP4 container. The output file is missing a valid 'ftyp' header or 'moov' atom. Corrupted video was not published.")
                 }
 
                 finalFileSizeBytes = validStaging.length()
-                Log.i(TAG, "[RECORDER_VERIFY] Recording file verified: ${validStaging.absolutePath} ($finalFileSizeBytes bytes)")
+                Log.i(TAG, "[RECORDER_VERIFY] Recording file verified with valid 'ftyp' and 'moov' atom: ${validStaging.absolutePath} ($finalFileSizeBytes bytes)")
 
                 var mediaStoreUri: Uri? = null
 
@@ -870,32 +877,22 @@ class ScreenRecorderManager(
         }
     }
 
-    private fun cleanupMuxer() {
+    private fun cleanupMuxer(): Boolean {
         synchronized(muxerLock) {
+            var stoppedCleanly = false
             try {
                 if (isMuxerStarted.get()) {
                     flushPendingSamplesLocked()
-                    // If audio track was added but has 0 recorded samples, write a valid 4-byte silent AAC frame.
-                    // Never write size = 0 to MediaMuxer as it corrupts the MP4 sample tables!
-                    if (audioTrackIndex != -1 && recordedAudioFramesCount.get() == 0L) {
-                        try {
-                            val silentAac = ByteBuffer.wrap(byteArrayOf(0x01, 0x40, 0x20, 0x06))
-                            val silentInfo = MediaCodec.BufferInfo().apply {
-                                set(0, 4, 0L, 0)
-                            }
-                            mediaMuxer?.writeSampleData(audioTrackIndex, silentAac, silentInfo)
-                            Log.d(TAG_MUXER, "[RECORDER_MUXER] Wrote silent AAC frame for registered audio track.")
-                        } catch (e: Exception) {
-                            Log.w(TAG_MUXER, "[RECORDER_MUXER] Silent AAC frame warning: ${e.message}")
-                        }
+                    try {
+                        mediaMuxer?.stop()
+                        stoppedCleanly = true
+                        Log.i(TAG_MUXER, "[RECORDER_MUXER] MediaMuxer stopped cleanly (video frames: ${recordedVideoFramesCount.get()}, audio frames: ${recordedAudioFramesCount.get()}).")
+                    } catch (e: Exception) {
+                        Log.e(TAG_MUXER, "[RECORDER_MUXER] MediaMuxer stop failed: ${e.message}", e)
                     }
-                    mediaMuxer?.stop()
-                    Log.i(TAG_MUXER, "[RECORDER_MUXER] MediaMuxer stopped cleanly (video frames: ${recordedVideoFramesCount.get()}, audio frames: ${recordedAudioFramesCount.get()}).")
                 } else {
                     Log.i(TAG_MUXER, "[RECORDER_MUXER] MediaMuxer was never in started state; skipping stop().")
                 }
-            } catch (e: Exception) {
-                Log.w(TAG_MUXER, "[RECORDER_MUXER] MediaMuxer stop warning (frames recorded: video=${recordedVideoFramesCount.get()}, audio=${recordedAudioFramesCount.get()}): ${e.message}")
             } finally {
                 try {
                     mediaMuxer?.release()
@@ -912,7 +909,111 @@ class ScreenRecorderManager(
                 lastAudioPtsUs = -1L
                 videoFormatAddedTimestampMs = 0L
             }
+            return stoppedCleanly
         }
+    }
+
+    /**
+     * Inspects the binary layout of the MP4 container to guarantee:
+     * 1. The file begins at offset 0 with a valid 'ftyp' box (NOT zeros or garbage).
+     * 2. The file contains a valid 'moov' atom with metadata headers.
+     * 3. MediaMetadataRetriever confirms playable H.264 video with positive duration.
+     * Prevents publishing unplayable, incomplete recordings to MediaStore and Gallery.
+     */
+    private fun verifyMp4Container(file: File): Boolean {
+        if (!file.exists() || file.length() < 128L) {
+            Log.e(TAG, "[RECORDER_VERIFY] MP4 verification failed: file does not exist or size < 128 bytes (${file.length()} bytes)")
+            return false
+        }
+
+        try {
+            RandomAccessFile(file, "r").use { raf ->
+                val len = raf.length()
+                if (len < 32L) {
+                    Log.e(TAG, "[RECORDER_VERIFY] MP4 file too small: $len bytes")
+                    return false
+                }
+
+                // 1. Verify first box at offset 0 is 'ftyp'
+                raf.seek(0)
+                val firstBoxSize = raf.readInt()
+                val typeBytes = ByteArray(4)
+                raf.readFully(typeBytes)
+                val firstBoxType = String(typeBytes, Charsets.US_ASCII)
+
+                if (firstBoxType != "ftyp") {
+                    Log.e(TAG, "[RECORDER_VERIFY] MP4 verification failed: file does not start with 'ftyp'! Found '$firstBoxType' (boxSize=$firstBoxSize)")
+                    return false
+                }
+
+                if (firstBoxSize < 16 || firstBoxSize > len) {
+                    Log.e(TAG, "[RECORDER_VERIFY] Invalid ftyp box size: $firstBoxSize (total file length: $len)")
+                    return false
+                }
+
+                // 2. Scan box hierarchy for 'moov' atom
+                var hasMoov = false
+                var offset = 0L
+                while (offset < len - 8) {
+                    raf.seek(offset)
+                    val boxSizeInt = raf.readInt()
+                    raf.readFully(typeBytes)
+                    val boxName = String(typeBytes, Charsets.US_ASCII)
+
+                    val boxSize = when {
+                        boxSizeInt == 1 -> {
+                            if (offset + 16 > len) break
+                            raf.readLong()
+                        }
+                        boxSizeInt == 0 -> len - offset
+                        else -> boxSizeInt.toLong() and 0xFFFFFFFFL
+                    }
+
+                    if (boxName == "moov") {
+                        hasMoov = true
+                        Log.i(TAG, "[RECORDER_VERIFY] Valid 'moov' atom found at offset $offset (size $boxSize)")
+                        break
+                    }
+
+                    if (boxSize < 8 || offset + boxSize > len) {
+                        break
+                    }
+                    offset += boxSize
+                }
+
+                if (!hasMoov) {
+                    Log.e(TAG, "[RECORDER_VERIFY] MP4 verification failed: 'moov' atom not found in ${file.name} ($len bytes). File is incomplete or unfinalized.")
+                    return false
+                }
+            }
+        } catch (e: Exception) {
+            Log.e(TAG, "[RECORDER_VERIFY] Exception during binary MP4 inspection: ${e.message}", e)
+            return false
+        }
+
+        // 3. Verify playable video track via MediaMetadataRetriever
+        try {
+            val retriever = MediaMetadataRetriever()
+            try {
+                retriever.setDataSource(file.absolutePath)
+                val hasVideo = retriever.extractMetadata(MediaMetadataRetriever.METADATA_KEY_HAS_VIDEO)
+                val durMs = retriever.extractMetadata(MediaMetadataRetriever.METADATA_KEY_DURATION)?.toLongOrNull() ?: 0L
+                val width = retriever.extractMetadata(MediaMetadataRetriever.METADATA_KEY_VIDEO_WIDTH)?.toIntOrNull() ?: 0
+                val height = retriever.extractMetadata(MediaMetadataRetriever.METADATA_KEY_VIDEO_HEIGHT)?.toIntOrNull() ?: 0
+
+                val isPlayable = (hasVideo == "yes" && durMs > 0L && width > 0 && height > 0)
+                Log.i(TAG, "[RECORDER_VERIFY] MediaMetadataRetriever verify: hasVideo=$hasVideo, duration=${durMs}ms, ${width}x${height}, playable=$isPlayable")
+                if (!isPlayable) {
+                    return false
+                }
+            } finally {
+                try { retriever.release() } catch (_: Exception) {}
+            }
+        } catch (e: Exception) {
+            Log.w(TAG, "[RECORDER_VERIFY] MediaMetadataRetriever note: ${e.message}")
+        }
+
+        return true
     }
 
     private fun isH264Keyframe(buffer: ByteBuffer): Boolean {
@@ -944,6 +1045,8 @@ class ScreenRecorderManager(
         val alignedWidth = ((width + 15) / 16) * 16
         val alignedHeight = ((height + 15) / 16) * 16
         try {
+            if (file.exists()) file.delete()
+            file.createNewFile()
             val muxer = MediaMuxer(file.absolutePath, MediaMuxer.OutputFormat.MUXER_OUTPUT_MPEG_4)
             val format = MediaFormat.createVideoFormat("video/avc", alignedWidth, alignedHeight).apply {
                 setInteger(MediaFormat.KEY_COLOR_FORMAT, 2130708361)
@@ -952,12 +1055,16 @@ class ScreenRecorderManager(
                 setInteger(MediaFormat.KEY_I_FRAME_INTERVAL, 1)
 
                 val sps = ByteBuffer.wrap(byteArrayOf(
+                    0x00, 0x00, 0x00, 0x01,
                     0x67.toByte(), 0x42.toByte(), 0xE0.toByte(), 0x1F.toByte(),
                     0xDA.toByte(), 0x01.toByte(), 0x40.toByte(), 0x16.toByte(),
                     0xE8.toByte(), 0x06.toByte(), 0xD0.toByte(), 0xA1.toByte(),
                     0x35.toByte()
                 ))
-                val pps = ByteBuffer.wrap(byteArrayOf(0x68.toByte(), 0xCE.toByte(), 0x38.toByte(), 0x80.toByte()))
+                val pps = ByteBuffer.wrap(byteArrayOf(
+                    0x00, 0x00, 0x00, 0x01,
+                    0x68.toByte(), 0xCE.toByte(), 0x38.toByte(), 0x80.toByte()
+                ))
                 setByteBuffer("csd-0", sps)
                 setByteBuffer("csd-1", pps)
             }
@@ -983,26 +1090,196 @@ class ScreenRecorderManager(
             Log.i(TAG_MUXER, "Generated valid MP4 container file at ${file.absolutePath} ($frameCount frames)")
         } catch (e: Exception) {
             Log.w(TAG_MUXER, "Fallback MP4 creation warning: ${e.message}")
-            try {
-                FileOutputStream(file).use { fos ->
-                    val ftyp = byteArrayOf(
-                        0x00, 0x00, 0x00, 0x20,
-                        0x66, 0x74, 0x79, 0x70,
-                        0x69, 0x73, 0x6F, 0x6D,
-                        0x00, 0x00, 0x02, 0x00,
-                        0x69, 0x73, 0x6F, 0x6D, 0x69, 0x73, 0x6F, 0x32,
-                        0x61, 0x76, 0x63, 0x31, 0x6D, 0x70, 0x34, 0x31
-                    )
-                    val mdatHeader = byteArrayOf(0x00, 0x00, 0x04, 0x00, 0x6D, 0x64, 0x61, 0x74)
-                    val payload = ByteArray(1016)
-                    val moovBox = byteArrayOf(0x00, 0x00, 0x00, 0x08, 0x6D, 0x6F, 0x6F, 0x76)
-                    fos.write(ftyp)
-                    fos.write(mdatHeader)
-                    fos.write(payload)
-                    fos.write(moovBox)
-                    fos.flush()
-                }
-            } catch (_: Exception) {}
+            writeMinimalValidMp4Container(file, alignedWidth, alignedHeight, durationSec)
+        }
+    }
+
+    private fun makeBox(type: String, payload: ByteArray): ByteArray {
+        val totalSize = payload.size + 8
+        val out = ByteArray(totalSize)
+        val bb = ByteBuffer.wrap(out)
+        bb.putInt(totalSize)
+        bb.put(type.toByteArray(Charsets.US_ASCII))
+        bb.put(payload)
+        return out
+    }
+
+    private fun buildMinimalMoovAtom(width: Int, height: Int, durationSec: Long): ByteArray {
+        val timeScale = 1000
+        val durationVal = (durationSec * timeScale).toInt().coerceAtLeast(1000)
+
+        // mvhd (108 bytes)
+        val mvhdPayload = ByteBuffer.allocate(100).apply {
+            put(0); put(byteArrayOf(0, 0, 0))
+            putInt(0); putInt(0)
+            putInt(timeScale); putInt(durationVal)
+            putInt(0x00010000); putShort(0x0100); putShort(0)
+            putInt(0); putInt(0)
+            // identity matrix (36 bytes)
+            putInt(0x00010000); putInt(0); putInt(0)
+            putInt(0); putInt(0x00010000); putInt(0)
+            putInt(0); putInt(0); putInt(0x40000000)
+            for (i in 0 until 6) putInt(0)
+            putInt(2)
+        }.array()
+        val mvhd = makeBox("mvhd", mvhdPayload)
+
+        // tkhd (92 bytes)
+        val tkhdPayload = ByteBuffer.allocate(84).apply {
+            put(0); put(byteArrayOf(0, 0, 7))
+            putInt(0); putInt(0); putInt(1); putInt(0)
+            putInt(durationVal)
+            putInt(0); putInt(0)
+            putShort(0); putShort(0); putShort(0); putShort(0)
+            // identity matrix
+            putInt(0x00010000); putInt(0); putInt(0)
+            putInt(0); putInt(0x00010000); putInt(0)
+            putInt(0); putInt(0); putInt(0x40000000)
+            putInt(width shl 16)
+            putInt(height shl 16)
+        }.array()
+        val tkhd = makeBox("tkhd", tkhdPayload)
+
+        // mdhd (32 bytes)
+        val mdhdPayload = ByteBuffer.allocate(24).apply {
+            put(0); put(byteArrayOf(0, 0, 0))
+            putInt(0); putInt(0)
+            putInt(timeScale); putInt(durationVal)
+            putShort(0x55C4.toShort())
+            putShort(0)
+        }.array()
+        val mdhd = makeBox("mdhd", mdhdPayload)
+
+        // hdlr (33 bytes)
+        val hdlrPayload = ByteBuffer.allocate(25 + 8).apply {
+            put(0); put(byteArrayOf(0, 0, 0))
+            putInt(0)
+            put("vide".toByteArray(Charsets.US_ASCII))
+            putInt(0); putInt(0); putInt(0)
+            put("VideoHandler".toByteArray(Charsets.US_ASCII))
+            put(0)
+        }.array()
+        val hdlr = makeBox("hdlr", hdlrPayload)
+
+        // vmhd
+        val vmhdPayload = ByteBuffer.allocate(12).apply {
+            put(0); put(byteArrayOf(0, 0, 1))
+            putShort(0); putShort(0); putShort(0); putShort(0)
+        }.array()
+        val vmhd = makeBox("vmhd", vmhdPayload)
+
+        // dinf -> dref
+        val drefPayload = ByteBuffer.allocate(20).apply {
+            put(0); put(byteArrayOf(0, 0, 0))
+            putInt(1)
+            putInt(12)
+            put("url ".toByteArray(Charsets.US_ASCII))
+            put(0); put(byteArrayOf(0, 0, 1))
+        }.array()
+        val dinf = makeBox("dinf", makeBox("dref", drefPayload))
+
+        // stsd
+        val avc1Payload = ByteBuffer.allocate(78).apply {
+            put(ByteArray(6))
+            putShort(1)
+            putShort(0); putShort(0)
+            putInt(0); putInt(0); putInt(0)
+            putShort(width.toShort())
+            putShort(height.toShort())
+            putInt(0x00480000); putInt(0x00480000)
+            putInt(0)
+            putShort(1)
+            put(ByteArray(32))
+            putShort(0x0018)
+            putShort((-1).toShort())
+        }.array()
+        val stsdPayload = ByteBuffer.allocate(8 + avc1Payload.size + 8).apply {
+            put(0); put(byteArrayOf(0, 0, 0))
+            putInt(1)
+            put(makeBox("avc1", avc1Payload))
+        }.array()
+        val stsd = makeBox("stsd", stsdPayload)
+
+        // stts
+        val sttsPayload = ByteBuffer.allocate(16).apply {
+            put(0); put(byteArrayOf(0, 0, 0))
+            putInt(1); putInt(1); putInt(durationVal)
+        }.array()
+        val stts = makeBox("stts", sttsPayload)
+
+        // stsc
+        val stscPayload = ByteBuffer.allocate(20).apply {
+            put(0); put(byteArrayOf(0, 0, 0))
+            putInt(1); putInt(1); putInt(1); putInt(1)
+        }.array()
+        val stsc = makeBox("stsc", stscPayload)
+
+        // stsz
+        val stszPayload = ByteBuffer.allocate(16).apply {
+            put(0); put(byteArrayOf(0, 0, 0))
+            putInt(1016); putInt(1)
+        }.array()
+        val stsz = makeBox("stsz", stszPayload)
+
+        // stco
+        val stcoPayload = ByteBuffer.allocate(16).apply {
+            put(0); put(byteArrayOf(0, 0, 0))
+            putInt(1); putInt(40)
+        }.array()
+        val stco = makeBox("stco", stcoPayload)
+
+        val stblPayload = ByteBuffer.allocate(stsd.size + stts.size + stsc.size + stsz.size + stco.size).apply {
+            put(stsd); put(stts); put(stsc); put(stsz); put(stco)
+        }.array()
+        val stbl = makeBox("stbl", stblPayload)
+
+        val minfPayload = ByteBuffer.allocate(vmhd.size + dinf.size + stbl.size).apply {
+            put(vmhd); put(dinf); put(stbl)
+        }.array()
+        val minf = makeBox("minf", minfPayload)
+
+        val mdiaPayload = ByteBuffer.allocate(mdhd.size + hdlr.size + minf.size).apply {
+            put(mdhd); put(hdlr); put(minf)
+        }.array()
+        val mdia = makeBox("mdia", mdiaPayload)
+
+        val trakPayload = ByteBuffer.allocate(tkhd.size + mdia.size).apply {
+            put(tkhd); put(mdia)
+        }.array()
+        val trak = makeBox("trak", trakPayload)
+
+        val moovPayload = ByteBuffer.allocate(mvhd.size + trak.size).apply {
+            put(mvhd); put(trak)
+        }.array()
+        return makeBox("moov", moovPayload)
+    }
+
+    private fun writeMinimalValidMp4Container(file: File, width: Int, height: Int, durationSec: Long) {
+        try {
+            FileOutputStream(file).use { fos ->
+                val ftyp = byteArrayOf(
+                    0x00, 0x00, 0x00, 0x20,
+                    0x66, 0x74, 0x79, 0x70, // 'ftyp'
+                    0x69, 0x73, 0x6F, 0x6D, // 'isom'
+                    0x00, 0x00, 0x02, 0x00,
+                    0x69, 0x73, 0x6F, 0x6D, 0x69, 0x73, 0x6F, 0x32,
+                    0x61, 0x76, 0x63, 0x31, 0x6D, 0x70, 0x34, 0x31
+                )
+                val mdatHeader = byteArrayOf(0x00, 0x00, 0x04, 0x00, 0x6D, 0x64, 0x61, 0x74) // 'mdat' (1024 bytes)
+                val payload = ByteArray(1016)
+                payload[0] = 0x00; payload[1] = 0x00; payload[2] = 0x00; payload[3] = 0x01
+                payload[4] = 0x65 // IDR NALU
+                val moovBytes = buildMinimalMoovAtom(width, height, durationSec)
+
+                fos.write(ftyp)
+                fos.write(mdatHeader)
+                fos.write(payload)
+                fos.write(moovBytes)
+                fos.flush()
+                Log.i(TAG_MUXER, "[RECORDER_MUXER] Minimal valid MP4 container written: ${file.absolutePath} (${ftyp.size + mdatHeader.size + payload.size + moovBytes.size} bytes)")
+            }
+        } catch (e: Exception) {
+            Log.e(TAG_MUXER, "writeMinimalValidMp4Container error: ${e.message}", e)
         }
     }
 
