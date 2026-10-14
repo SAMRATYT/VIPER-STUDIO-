@@ -64,29 +64,30 @@ jobs:
         with:
           gradle-version: '9.3.1'
 
-      - name: Create temporary debug keystore
+      - name: Restore persistent signing keystore
         run: |
           KEYSTORE_PATH="./debug.keystore"
           if [ -f "${KEYSTORE_PATH}" ]; then
-            echo "Debug keystore already exists at ${KEYSTORE_PATH}. Skipping generation."
+            echo "Persistent keystore already exists at ${KEYSTORE_PATH}."
+          elif [ -f "./debug.keystore.base64" ]; then
+            echo "Restoring persistent keystore from repository debug.keystore.base64..."
+            base64 -d ./debug.keystore.base64 > "${KEYSTORE_PATH}"
+          elif [ -n "${{ secrets.DEBUG_KEYSTORE_BASE64 }}" ]; then
+            echo "Restoring persistent keystore from GitHub Secret DEBUG_KEYSTORE_BASE64..."
+            echo "${{ secrets.DEBUG_KEYSTORE_BASE64 }}" | base64 -d > "${KEYSTORE_PATH}"
           else
-            echo "Debug keystore missing. Generating temporary debug keystore..."
-            "${JAVA_HOME}/bin/keytool" -genkeypair -v \
-              -keystore "${KEYSTORE_PATH}" \
-              -storepass android \
-              -alias androiddebugkey \
-              -keypass android \
-              -keyalg RSA \
-              -keysize 2048 \
-              -validity 10000 \
-              -dname "CN=Android Debug,O=Android,C=US"
+            echo "ERROR: Persistent debug.keystore or debug.keystore.base64 missing! Refusing to generate a random key that breaks Firebase Google Sign-In and APK updates."
+            exit 1
           fi
 
           if [ ! -f "${KEYSTORE_PATH}" ]; then
-            echo "ERROR: Keystore file ${KEYSTORE_PATH} was not found after generation attempt."
+            echo "ERROR: Keystore file ${KEYSTORE_PATH} was not found after restore."
             exit 1
           fi
-          echo "Temporary debug keystore verified."
+
+          echo "=== Verified Keystore Certificate Fingerprints ==="
+          "${JAVA_HOME}/bin/keytool" -list -v -keystore "${KEYSTORE_PATH}" -storepass android -alias androiddebugkey | grep -E "SHA1:|SHA256:" || true
+          echo "Persistent signing keystore verified successfully."
 
       - name: Build the debug APK
         run: |

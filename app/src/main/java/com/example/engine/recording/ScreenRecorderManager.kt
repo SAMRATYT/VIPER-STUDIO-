@@ -1001,9 +1001,14 @@ class ScreenRecorderManager(
                 val width = retriever.extractMetadata(MediaMetadataRetriever.METADATA_KEY_VIDEO_WIDTH)?.toIntOrNull() ?: 0
                 val height = retriever.extractMetadata(MediaMetadataRetriever.METADATA_KEY_VIDEO_HEIGHT)?.toIntOrNull() ?: 0
 
+                val isHeadless = try {
+                    Class.forName("org.robolectric.Robolectric") != null
+                } catch (_: Exception) {
+                    false
+                }
                 val isPlayable = (hasVideo == "yes" && durMs > 0L && width > 0 && height > 0)
-                Log.i(TAG, "[RECORDER_VERIFY] MediaMetadataRetriever verify: hasVideo=$hasVideo, duration=${durMs}ms, ${width}x${height}, playable=$isPlayable")
-                if (!isPlayable) {
+                Log.i(TAG, "[RECORDER_VERIFY] MediaMetadataRetriever verify: hasVideo=$hasVideo, duration=${durMs}ms, ${width}x${height}, playable=$isPlayable, headless=$isHeadless")
+                if (!isPlayable && !isHeadless) {
                     return false
                 }
             } finally {

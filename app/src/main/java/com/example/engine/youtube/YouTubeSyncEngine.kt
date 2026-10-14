@@ -135,10 +135,9 @@ class YouTubeSyncEngine(private val context: Context) {
             _authError.value = null
 
             try {
-                val targetActivity = context.findActivity()
-                val targetContext = targetActivity ?: context
-                val callContext = if (targetActivity != null) MutableContextWrapper(targetActivity) else targetContext
-                val credentialManager = CredentialManager.create(targetContext)
+                val targetActivity = context.findActivity() ?: (context as? Activity)
+                val callerContext = targetActivity ?: context
+                val credentialManager = CredentialManager.create(callerContext)
 
                 // Sign out of Firebase and flush CredentialManager state if switching accounts
                 if (forceSwitchAccount) {
@@ -177,9 +176,12 @@ class YouTubeSyncEngine(private val context: Context) {
                     return@launch
                 }
 
-                // Primary Request: Use GetGoogleIdOption configured to show ALL accounts on device
-                // and NEVER auto-select, displaying the interactive account selection bottom sheet popup
+                // Primary Request: Combine GetSignInWithGoogleOption (Button Flow) and GetGoogleIdOption (All Accounts, auto-select disabled)
                 val nonce = generateSecureRandomNonce()
+                val signInWithGoogleOption = GetSignInWithGoogleOption.Builder(serverClientId)
+                    .setNonce(nonce)
+                    .build()
+
                 val googleIdOption = GetGoogleIdOption.Builder()
                     .setFilterByAuthorizedAccounts(false) // Show all Google accounts on device
                     .setServerClientId(serverClientId)
@@ -188,13 +190,14 @@ class YouTubeSyncEngine(private val context: Context) {
                     .build()
 
                 val primaryRequest = GetCredentialRequest.Builder()
+                    .addCredentialOption(signInWithGoogleOption)
                     .addCredentialOption(googleIdOption)
                     .build()
 
                 val result = try {
-                    credentialManager.getCredential(context = callContext, request = primaryRequest)
+                    credentialManager.getCredential(context = callerContext, request = primaryRequest)
                 } catch (primaryEx: Exception) {
-                    Log.w(TAG, "Primary GetGoogleIdOption attempt note: ${primaryEx.message}")
+                    Log.w(TAG, "Primary Google Account Picker attempt note: ${primaryEx.message}")
                     val rawExMsg = primaryEx.message?.trim().orEmpty()
                     val isCancellation = primaryEx is GetCredentialCancellationException
                     val isExplicitUserCancel = isCancellation &&
@@ -218,14 +221,14 @@ class YouTubeSyncEngine(private val context: Context) {
                         delay(200)
                     }
 
-                    // Secondary Request fallback: GetSignInWithGoogleOption with a fresh nonce
-                    val signInWithGoogleOption = GetSignInWithGoogleOption.Builder(serverClientId)
+                    // Secondary Request fallback: dedicated GetSignInWithGoogleOption with a fresh nonce
+                    val fallbackOption = GetSignInWithGoogleOption.Builder(serverClientId)
                         .setNonce(generateSecureRandomNonce())
                         .build()
                     val fallbackRequest = GetCredentialRequest.Builder()
-                        .addCredentialOption(signInWithGoogleOption)
+                        .addCredentialOption(fallbackOption)
                         .build()
-                    credentialManager.getCredential(context = callContext, request = fallbackRequest)
+                    credentialManager.getCredential(context = callerContext, request = fallbackRequest)
                 }
 
                 val credential = result.credential
