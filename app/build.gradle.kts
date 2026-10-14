@@ -40,7 +40,7 @@ create("debugConfig") {
     keyPassword = System.getenv("VIPER_KEY_PASSWORD")
 }
 
-    }
+    
   }
 
   buildTypes {
