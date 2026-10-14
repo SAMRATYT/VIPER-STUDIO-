@@ -637,7 +637,12 @@ class ViperStudioViewModel(application: Application) : AndroidViewModel(applicat
             StreamForegroundService.startServiceCameraOnly(app, "Screen Recording (MP4)")
         }
         val cfg = _streamConfig.value
-        recorderManager.startRecording(cfg.resolution, cfg.isLandscape)
+        recorderManager.startRecording(
+            resolution = cfg.resolution,
+            isLandscape = cfg.isLandscape,
+            targetFps = cfg.fps.value,
+            bitrateKbps = cfg.bitrateKbps
+        )
     }
 
     fun pauseScreenRecording() {
@@ -649,9 +654,6 @@ class ViperStudioViewModel(application: Application) : AndroidViewModel(applicat
     }
 
     fun stopScreenRecording() {
-        if (StreamForegroundService.isServiceRunning) {
-            StreamForegroundService.stopRecording(app)
-        }
         recorderManager.stopRecording(
             onSaved = { entity ->
                 _lastSavedRecording.value = RecordingItem(

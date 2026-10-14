@@ -179,7 +179,13 @@ fun ViperStudioApp(viewModel: ViperStudioViewModel) {
         if (projectionManager != null) {
             pendingCaptureAction = action
             try {
-                mediaProjectionLauncher.launch(projectionManager.createScreenCaptureIntent())
+                val captureIntent = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.UPSIDE_DOWN_CAKE) {
+                    val config = android.media.projection.MediaProjectionConfig.createConfigForDefaultDisplay()
+                    projectionManager.createScreenCaptureIntent(config)
+                } else {
+                    projectionManager.createScreenCaptureIntent()
+                }
+                mediaProjectionLauncher.launch(captureIntent)
             } catch (e: Exception) {
                 android.util.Log.e("MainActivity", "Failed to launch screen capture intent", e)
                 pendingCaptureAction = null

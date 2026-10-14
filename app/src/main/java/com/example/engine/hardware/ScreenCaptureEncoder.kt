@@ -21,6 +21,7 @@ import android.os.Build
 import android.os.Bundle
 import android.os.Handler
 import android.os.HandlerThread
+import android.os.Looper
 import android.os.Process
 import android.util.Log
 import androidx.core.content.ContextCompat
@@ -333,25 +334,37 @@ class ScreenCaptureEncoder(private val context: Context) : AudioRouteChangeListe
             val rawWidth = if (isLandscape) resolution.width else resolution.height
             val rawHeight = if (isLandscape) resolution.height else resolution.width
 
-            // 16-pixel alignment for Motorola Snapdragon hardware encoder compatibility
-            val alignedWidth = ((rawWidth + 15) / 16) * 16
-            val alignedHeight = ((rawHeight + 15) / 16) * 16
+            // Native 1080p and 720p dimensions must NOT be padded. For arbitrary resolutions, align to 16.
+            val targetWidth = if (rawWidth == 1920 || rawWidth == 1280 || rawWidth == 720 || rawWidth == 1080) {
+                rawWidth
+            } else {
+                ((rawWidth + 15) / 16) * 16
+            }
+            val targetHeight = if (rawHeight == 1080 || rawHeight == 720 || rawHeight == 1280 || rawHeight == 1920) {
+                rawHeight
+            } else {
+                ((rawHeight + 15) / 16) * 16
+            }
 
-            val format = MediaFormat.createVideoFormat(mimeType, alignedWidth, alignedHeight).apply {
+            val fpsVal = targetFps.coerceIn(24, 60)
+            val bitrateVal = (bitrateKbps * 1000).coerceIn(1000000, 15000000)
+
+            val format = MediaFormat.createVideoFormat(mimeType, targetWidth, targetHeight).apply {
                 setInteger(MediaFormat.KEY_COLOR_FORMAT, MediaCodecInfo.CodecCapabilities.COLOR_FormatSurface)
-                setInteger(MediaFormat.KEY_BIT_RATE, (bitrateKbps * 1000).coerceIn(1000000, 15000000))
-                val fpsVal = targetFps.coerceIn(24, 60)
+                setInteger(MediaFormat.KEY_BIT_RATE, bitrateVal)
                 setInteger(MediaFormat.KEY_FRAME_RATE, fpsVal)
                 setInteger(MediaFormat.KEY_CAPTURE_RATE, fpsVal)
                 setFloat(MediaFormat.KEY_OPERATING_RATE, fpsVal.toFloat())
                 setInteger(MediaFormat.KEY_PRIORITY, 0)
-                setInteger(MediaFormat.KEY_I_FRAME_INTERVAL, 2) // 2-second keyframe interval required by YouTube
+                setInteger(MediaFormat.KEY_I_FRAME_INTERVAL, 1) // 1-second interval guarantees prompt keyframe delivery
                 try {
                     setInteger(MediaFormat.KEY_BITRATE_MODE, MediaCodecInfo.EncoderCapabilities.BITRATE_MODE_VBR)
                 } catch (_: Exception) {}
 
                 val repeatUs = (1_000_000L / fpsVal).coerceAtLeast(16_666L)
-                setLong(MediaFormat.KEY_REPEAT_PREVIOUS_FRAME_AFTER, repeatUs)
+                try {
+                    setLong(MediaFormat.KEY_REPEAT_PREVIOUS_FRAME_AFTER, repeatUs)
+                } catch (_: Exception) {}
 
                 if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M) {
                     try {
@@ -360,30 +373,57 @@ class ScreenCaptureEncoder(private val context: Context) : AudioRouteChangeListe
                 }
             }
 
-            val codec = selectHardwareEncoder(mimeType) ?: MediaCodec.createEncoderByType(mimeType)
-            Log.i(TAG_VIDEO, "MediaCodec instantiated: ${codec.name} for ${alignedWidth}x${alignedHeight} (${if (isLandscape) "Landscape" else "Portrait"}) @ $targetFps fps")
+            var codec: MediaCodec? = null
+            try {
+                codec = selectHardwareEncoder(mimeType)
+                if (codec != null) {
+                    codec.configure(format, null, null, MediaCodec.CONFIGURE_FLAG_ENCODE)
+                }
+            } catch (e: Exception) {
+                Log.w(TAG_VIDEO, "Hardware encoder configure warning (${e.message}), trying createEncoderByType", e)
+                try { codec?.release() } catch (_: Exception) {}
+                codec = null
+            }
 
-            codec.configure(format, null, null, MediaCodec.CONFIGURE_FLAG_ENCODE)
+            if (codec == null) {
+                codec = MediaCodec.createEncoderByType(mimeType)
+                codec.configure(format, null, null, MediaCodec.CONFIGURE_FLAG_ENCODE)
+            }
+            Log.i(TAG_VIDEO, "MediaCodec initialized: ${codec.name} for ${targetWidth}x${targetHeight} (${if (isLandscape) "Landscape" else "Portrait"}) @ $targetFps fps")
+
             val inputSurface = codec.createInputSurface()
             codec.start()
             videoCodec = codec
 
-            val densityDpi = context.resources.displayMetrics.densityDpi
-            Log.i(TAG_PROJECTION, "Creating VirtualDisplay for MediaProjection (size: ${alignedWidth}x${alignedHeight}, dpi: $densityDpi)")
+            val densityDpi = context.resources.displayMetrics.densityDpi.coerceIn(160, 480)
+            Log.i(TAG_PROJECTION, "Creating VirtualDisplay for MediaProjection (size: ${targetWidth}x${targetHeight}, dpi: $densityDpi)")
 
+            // CRITICAL: Must use Main Looper Handler so createVirtualDisplay never fails on background worker threads
+            val mainHandler = Handler(Looper.getMainLooper())
             virtualDisplay = projection.createVirtualDisplay(
                 "ViperScreenCaptureDisplay",
-                alignedWidth,
-                alignedHeight,
+                targetWidth,
+                targetHeight,
                 densityDpi,
                 DisplayManager.VIRTUAL_DISPLAY_FLAG_AUTO_MIRROR,
                 inputSurface,
-                null,
-                null
+                object : VirtualDisplay.Callback() {
+                    override fun onPaused() {
+                        Log.d(TAG_PROJECTION, "VirtualDisplay paused")
+                    }
+                    override fun onResumed() {
+                        Log.d(TAG_PROJECTION, "VirtualDisplay resumed")
+                    }
+                    override fun onStopped() {
+                        Log.d(TAG_PROJECTION, "VirtualDisplay stopped")
+                    }
+                },
+                mainHandler
             )
 
             isVideoRunning.set(true)
             startVideoDrainLoop(codec)
+            requestKeyFrame()
             true
         } catch (e: Exception) {
             Log.e(TAG_VIDEO, "Failed to initialize hardware video encoder", e)
@@ -398,9 +438,25 @@ class ScreenCaptureEncoder(private val context: Context) : AudioRouteChangeListe
             for (info in list.codecInfos) {
                 if (!info.isEncoder) continue
                 if (info.supportedTypes.any { it.equals(mimeType, ignoreCase = true) }) {
+                    val caps = try {
+                        info.getCapabilitiesForType(mimeType)
+                    } catch (_: Exception) {
+                        null
+                    } ?: continue
+
+                    val supportsSurface = caps.colorFormats.contains(MediaCodecInfo.CodecCapabilities.COLOR_FormatSurface)
+                    if (!supportsSurface) continue
+
                     val name = info.name.lowercase()
-                    if (name.contains("qcom") || name.contains("c2.qcom") || name.contains("omx.qcom")) {
-                        Log.i(TAG_VIDEO, "Selected Qualcomm hardware encoder: ${info.name}")
+                    val isHw = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+                        info.isHardwareAccelerated
+                    } else {
+                        !name.startsWith("omx.google.") && !name.startsWith("c2.android.") && !name.startsWith("omx.ffmpeg.")
+                    }
+                    val isVendorHw = name.contains("qcom") || name.contains("mtk") || name.contains("exynos") ||
+                            name.contains("samsung") || name.contains("hisi") || name.contains("mali") || name.contains("powervr")
+                    if (isHw || isVendorHw) {
+                        Log.i(TAG_VIDEO, "Selected hardware encoder: ${info.name} (supports Surface)")
                         return MediaCodec.createByCodecName(info.name)
                     }
                 }
@@ -410,6 +466,27 @@ class ScreenCaptureEncoder(private val context: Context) : AudioRouteChangeListe
             Log.w(TAG_VIDEO, "Hardware codec lookup error: ${e.message}")
             null
         }
+    }
+
+    private fun isH264Keyframe(buffer: ByteBuffer): Boolean {
+        try {
+            val dup = buffer.duplicate()
+            val limit = dup.limit()
+            var pos = dup.position()
+            while (pos < limit - 4) {
+                if (dup.get(pos) == 0.toByte() && dup.get(pos + 1) == 0.toByte()) {
+                    if (dup.get(pos + 2) == 1.toByte()) {
+                        val nalType = dup.get(pos + 3).toInt() and 0x1F
+                        if (nalType == 5) return true // IDR Picture
+                    } else if (dup.get(pos + 2) == 0.toByte() && dup.get(pos + 3) == 1.toByte() && pos + 4 < limit) {
+                        val nalType = dup.get(pos + 4).toInt() and 0x1F
+                        if (nalType == 5) return true // IDR Picture
+                    }
+                }
+                pos++
+            }
+        } catch (_: Exception) {}
+        return false
     }
 
     private fun startVideoDrainLoop(codec: MediaCodec) {
@@ -447,7 +524,7 @@ class ScreenCaptureEncoder(private val context: Context) : AudioRouteChangeListe
                                 outputBuffer.limit(bufferInfo.offset + bufferInfo.size)
 
                                 val isConfig = (bufferInfo.flags and MediaCodec.BUFFER_FLAG_CODEC_CONFIG) != 0
-                                val isKey = (bufferInfo.flags and MediaCodec.BUFFER_FLAG_KEY_FRAME) != 0
+                                val isKey = (bufferInfo.flags and MediaCodec.BUFFER_FLAG_KEY_FRAME) != 0 || isH264Keyframe(outputBuffer)
 
                                 if (isConfig) {
                                     parseSpsPpsFromConfigBuffer(outputBuffer, bufferInfo)
@@ -517,6 +594,13 @@ class ScreenCaptureEncoder(private val context: Context) : AudioRouteChangeListe
                 val ppsEnd = if (startCodes.size >= 3) startCodes[2] else bytes.size
                 currentPps = bytes.copyOfRange(startCodes[1] + 4, ppsEnd)
                 Log.i(TAG_VIDEO, "Parsed SPS (${currentSps.size}b) and PPS (${currentPps.size}b) from CODEC_CONFIG")
+                currentVideoFormat?.let { fmt ->
+                    fmt.setByteBuffer("csd-0", ByteBuffer.wrap(currentSps))
+                    fmt.setByteBuffer("csd-1", ByteBuffer.wrap(currentPps))
+                    for (listener in videoListeners) {
+                        listener.onVideoFormatAvailable(fmt, currentSps, currentPps)
+                    }
+                }
             }
         } catch (e: Exception) {
             Log.w(TAG_VIDEO, "Config buffer parse warning: ${e.message}")
@@ -1060,6 +1144,9 @@ class ScreenCaptureEncoder(private val context: Context) : AudioRouteChangeListe
         activeProjection = null
         currentVideoFormat = null
         currentAudioFormat = null
+        currentSps = ByteArray(0)
+        currentPps = ByteArray(0)
+        currentAudioSpecificConfig = ByteArray(0)
         liveMicLevel = 0f
         liveGameLevel = 0f
         Log.i(TAG_VIDEO, "ScreenCaptureEncoder fully stopped and clean.")

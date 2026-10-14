@@ -3,6 +3,8 @@ package com.example.engine.youtube
 import android.app.Activity
 import android.content.Context
 import android.content.ContextWrapper
+import android.content.MutableContextWrapper
+import android.util.Base64
 import android.util.Log
 import androidx.credentials.ClearCredentialStateRequest
 import androidx.credentials.CredentialManager
@@ -19,6 +21,7 @@ import com.google.android.libraries.identity.googleid.GetSignInWithGoogleOption
 import com.google.android.libraries.identity.googleid.GoogleIdTokenCredential
 import com.google.firebase.auth.FirebaseAuth
 import com.google.firebase.auth.GoogleAuthProvider
+import java.security.SecureRandom
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
@@ -109,10 +112,17 @@ class YouTubeSyncEngine(private val context: Context) {
         _authError.value = null
     }
 
+    private fun generateSecureRandomNonce(byteLength: Int = 32): String {
+        val randomBytes = ByteArray(byteLength)
+        SecureRandom().nextBytes(randomBytes)
+        return Base64.encodeToString(randomBytes, Base64.NO_WRAP or Base64.URL_SAFE or Base64.NO_PADDING)
+    }
+
     /**
      * Initiates Google Sign-In with the explicit Google Account Picker.
-     * Auto-select is explicitly DISABLED (setAutoSelectEnabled(false)) so the user
-     * can pick their Gmail account every time.
+     * Auto-select is explicitly DISABLED (setAutoSelectEnabled(false)) and
+     * setFilterByAuthorizedAccounts(false) is set so the user can pick any Gmail
+     * account on the device.
      */
     fun signInWithGoogle(
         context: Context,
@@ -127,15 +137,20 @@ class YouTubeSyncEngine(private val context: Context) {
             try {
                 val targetActivity = context.findActivity()
                 val targetContext = targetActivity ?: context
+                val callContext = if (targetActivity != null) MutableContextWrapper(targetActivity) else targetContext
                 val credentialManager = CredentialManager.create(targetContext)
 
-                // If user requested switching account or clean login, clear prior credential state first
+                // Sign out of Firebase and flush CredentialManager state if switching accounts
                 if (forceSwitchAccount) {
                     try {
-                        credentialManager.clearCredentialState(ClearCredentialStateRequest())
                         firebaseAuth?.signOut()
-                    } catch (e: Exception) {
-                        Log.d(TAG, "Clear credential state ignored: ${e.message}")
+                    } catch (e: Throwable) {
+                        Log.d(TAG, "Firebase signOut note: ${e.message}")
+                    }
+                    try {
+                        credentialManager.clearCredentialState(ClearCredentialStateRequest())
+                    } catch (e: Throwable) {
+                        Log.d(TAG, "clearCredentialState note: ${e.message}")
                     }
                 }
 
@@ -151,7 +166,7 @@ class YouTubeSyncEngine(private val context: Context) {
                     try {
                         context.getString(com.example.R.string.default_web_client_id)
                     } catch (e2: Exception) {
-                        ""
+                        "227479609974-3m9hai28r18n12tkthp9qjmosc5cvn9c.apps.googleusercontent.com"
                     }
                 }
 
@@ -162,36 +177,62 @@ class YouTubeSyncEngine(private val context: Context) {
                     return@launch
                 }
 
-                // Explicit Google Account Selection using GetGoogleIdOption
-                // setFilterByAuthorizedAccounts(false) ensures all Google accounts on the device are listed
-                // setAutoSelectEnabled(false) ensures the user is always prompted to pick their account
+                // Primary Request: Use GetGoogleIdOption configured to show ALL accounts on device
+                // and NEVER auto-select, displaying the interactive account selection bottom sheet popup
+                val nonce = generateSecureRandomNonce()
                 val googleIdOption = GetGoogleIdOption.Builder()
-                    .setFilterByAuthorizedAccounts(false)
+                    .setFilterByAuthorizedAccounts(false) // Show all Google accounts on device
                     .setServerClientId(serverClientId)
-                    .setAutoSelectEnabled(false)
+                    .setAutoSelectEnabled(false) // Always display the account selection UI
+                    .setNonce(nonce)
                     .build()
 
-                val googleIdRequest = GetCredentialRequest.Builder()
+                val primaryRequest = GetCredentialRequest.Builder()
                     .addCredentialOption(googleIdOption)
                     .build()
 
                 val result = try {
-                    credentialManager.getCredential(context = targetContext, request = googleIdRequest)
-                } catch (noCredEx: NoCredentialException) {
-                    Log.w(TAG, "GetGoogleIdOption returned no credentials, trying GetSignInWithGoogleOption fallback: ${noCredEx.message}")
+                    credentialManager.getCredential(context = callContext, request = primaryRequest)
+                } catch (primaryEx: Exception) {
+                    Log.w(TAG, "Primary GetGoogleIdOption attempt note: ${primaryEx.message}")
+                    val rawExMsg = primaryEx.message?.trim().orEmpty()
+                    val isCancellation = primaryEx is GetCredentialCancellationException
+                    val isExplicitUserCancel = isCancellation &&
+                        (rawExMsg.contains("cancel", ignoreCase = true) || rawExMsg.isBlank()) &&
+                        !rawExMsg.contains("16") &&
+                        !rawExMsg.contains("reauth", ignoreCase = true)
+
+                    if (isExplicitUserCancel) {
+                        // User genuinely dismissed the picker; do not re-prompt
+                        throw primaryEx
+                    }
+
+                    // If reauth failed (Code 16), clear stale credential state before retry
+                    if (rawExMsg.contains("16") || rawExMsg.contains("reauth", ignoreCase = true)) {
+                        Log.i(TAG, "Reauth code 16 detected. Clearing credential cache before secondary attempt...")
+                        try {
+                            credentialManager.clearCredentialState(ClearCredentialStateRequest())
+                        } catch (ce: Throwable) {
+                            Log.d(TAG, "clearCredentialState note: ${ce.message}")
+                        }
+                        delay(200)
+                    }
+
+                    // Secondary Request fallback: GetSignInWithGoogleOption with a fresh nonce
                     val signInWithGoogleOption = GetSignInWithGoogleOption.Builder(serverClientId)
+                        .setNonce(generateSecureRandomNonce())
                         .build()
                     val fallbackRequest = GetCredentialRequest.Builder()
                         .addCredentialOption(signInWithGoogleOption)
                         .build()
-                    credentialManager.getCredential(context = targetContext, request = fallbackRequest)
+                    credentialManager.getCredential(context = callContext, request = fallbackRequest)
                 }
 
                 val credential = result.credential
                 val isGoogleIdCredential = credential is CustomCredential && (
                     credential.type == GoogleIdTokenCredential.TYPE_GOOGLE_ID_TOKEN_CREDENTIAL ||
                     credential.type == GoogleIdTokenCredential.TYPE_GOOGLE_ID_TOKEN_SIWG_CREDENTIAL ||
-                    credential.type.startsWith("com.google.android.libraries.identity.googleid")
+                    credential.type.contains("googleid", ignoreCase = true)
                 )
 
                 if (isGoogleIdCredential) {
@@ -203,8 +244,10 @@ class YouTubeSyncEngine(private val context: Context) {
 
                     // Authenticate with Firebase Authentication
                     val firebaseResult = try {
-                        val authCred = GoogleAuthProvider.getCredential(idToken, null)
-                        firebaseAuth?.signInWithCredential(authCred)?.await()
+                        if (!idToken.isNullOrBlank()) {
+                            val authCred = GoogleAuthProvider.getCredential(idToken, null)
+                            firebaseAuth?.signInWithCredential(authCred)?.await()
+                        } else null
                     } catch (fbEx: Throwable) {
                         Log.w(TAG, "Firebase auth with idToken note: ${fbEx.message}")
                         null
@@ -226,7 +269,7 @@ class YouTubeSyncEngine(private val context: Context) {
                         activeBroadcastTitle = if (currentInfo.activeBroadcastTitle.isNotBlank()) currentInfo.activeBroadcastTitle else "VIPER Live Stream",
                         streamKey = if (currentInfo.streamKey.isNotBlank()) currentInfo.streamKey else "live_${finalEmail.take(4)}_${System.currentTimeMillis().toString().takeLast(6)}",
                         lastSyncTimeMs = System.currentTimeMillis(),
-                        isYouTubeAuthorized = false // YouTube permissions requested separately as per requirement 6
+                        isYouTubeAuthorized = false // YouTube permissions requested separately
                     )
 
                     _channelInfo.value = updated
@@ -246,10 +289,25 @@ class YouTubeSyncEngine(private val context: Context) {
                 val errType = e.type.ifBlank { "USER_CANCELED" }
                 Log.w(TAG, "GetCredentialCancellationException: type=$errType, message=$rawMsg", e)
 
-                val displayMsg = if (rawMsg.contains("activity is cancelled by the user", ignoreCase = true) || rawMsg.isBlank()) {
-                    "Google Sign-In closed or aborted [$errType]. If you selected an account, Google Play Services aborted authorization: verify that your Google account is added under 'Test users' in Google Cloud Console OAuth Consent Screen and SHA-1 (DE:17:23:21:3C:1F:CF:78:4E:C6:A5:08:C6:ED:2B:29:47:1D:A4:53) is registered for package com.aistudio.viperstudio.gxltqv."
-                } else {
-                    "Google Sign-In aborted [$errType]: $rawMsg"
+                val displayMsg = when {
+                    rawMsg.contains("16") || rawMsg.contains("reauth failed", ignoreCase = true) -> {
+                        "Google Play Services re-authentication failed [Code 16].\n\n" +
+                        "To resolve this for your Moto G96 5G or any account:\n" +
+                        "1. In Google Cloud Console (project viper-studio-608b1), go to APIs & Services > OAuth consent screen.\n" +
+                        "2. If publishing status is 'Testing', add your email under 'Test users', or click 'PUBLISH APP' to enable all accounts.\n" +
+                        "3. In Firebase Console > Authentication > Sign-in method, ensure 'Google' provider is ENABLED.\n" +
+                        "4. Verified credentials:\n" +
+                        "   • Package: com.aistudio.viperstudio.gxltqv\n" +
+                        "   • SHA-1: DE:17:23:21:3C:1F:CF:78:4E:C6:A5:08:C6:ED:2B:29:47:1D:A4:53\n" +
+                        "   • SHA-256: 9C:D3:AC:A1:6F:79:A5:18:87:D1:14:97:7A:2F:4E:DC:B4:68:5B:D6:16:C6:60:93:67:64:05:59:B0:54:22:A5\n" +
+                        "   • Web Client ID: 227479609974-3m9hai28r18n12tkthp9qjmosc5cvn9c.apps.googleusercontent.com"
+                    }
+                    rawMsg.contains("activity is cancelled by the user", ignoreCase = true) || rawMsg.isBlank() -> {
+                        "Google Sign-In canceled by user. Tap Sign-In to try again."
+                    }
+                    else -> {
+                        "Google Sign-In aborted [$errType]: $rawMsg"
+                    }
                 }
                 _authError.value = displayMsg
                 withContext(Dispatchers.Main) { onError(displayMsg) }
@@ -262,15 +320,29 @@ class YouTubeSyncEngine(private val context: Context) {
             } catch (e: GetCredentialException) {
                 val rawMsg = e.message ?: "Authentication error"
                 val errType = e.type.ifBlank { e::class.simpleName ?: "GetCredentialException" }
-                val isDevError = rawMsg.contains("16") || rawMsg.contains("DEVELOPER_ERROR", ignoreCase = true) || rawMsg.contains("10")
-                val userMsg = if (isDevError) {
-                    "Google Sign-In configuration error ($errType: $rawMsg): Ensure the APK signing SHA-1 (DE:17:23:21:3C:1F:CF:78:4E:C6:A5:08:C6:ED:2B:29:47:1D:A4:53) and package name (com.aistudio.viperstudio.gxltqv) match the Android OAuth Client in Google Cloud Console."
-                } else {
-                    "Google Sign-In failed [$errType]: $rawMsg"
+                val displayMsg = when {
+                    rawMsg.contains("16") || rawMsg.contains("reauth failed", ignoreCase = true) -> {
+                        "Google Play Services re-authentication failed [Code 16].\n\n" +
+                        "To resolve this for your Moto G96 5G or any account:\n" +
+                        "1. In Google Cloud Console (project viper-studio-608b1), go to APIs & Services > OAuth consent screen.\n" +
+                        "2. If publishing status is 'Testing', add your email under 'Test users', or click 'PUBLISH APP' to enable all accounts.\n" +
+                        "3. In Firebase Console > Authentication > Sign-in method, ensure 'Google' provider is ENABLED.\n" +
+                        "4. Verified credentials:\n" +
+                        "   • Package: com.aistudio.viperstudio.gxltqv\n" +
+                        "   • SHA-1: DE:17:23:21:3C:1F:CF:78:4E:C6:A5:08:C6:ED:2B:29:47:1D:A4:53\n" +
+                        "   • SHA-256: 9C:D3:AC:A1:6F:79:A5:18:87:D1:14:97:7A:2F:4E:DC:B4:68:5B:D6:16:C6:60:93:67:64:05:59:B0:54:22:A5\n" +
+                        "   • Web Client ID: 227479609974-3m9hai28r18n12tkthp9qjmosc5cvn9c.apps.googleusercontent.com"
+                    }
+                    rawMsg.contains("10") || rawMsg.contains("DEVELOPER_ERROR", ignoreCase = true) -> {
+                        "Google Sign-In configuration error [Code 10]: SHA-1 (DE:17:23:21:3C:1F:CF:78:4E:C6:A5:08:C6:ED:2B:29:47:1D:A4:53) or package name (com.aistudio.viperstudio.gxltqv) mismatch in Google Cloud Console."
+                    }
+                    else -> {
+                        "Google Sign-In failed [$errType]: $rawMsg"
+                    }
                 }
-                Log.w(TAG, userMsg, e)
-                _authError.value = userMsg
-                withContext(Dispatchers.Main) { onError(userMsg) }
+                Log.w(TAG, displayMsg, e)
+                _authError.value = displayMsg
+                withContext(Dispatchers.Main) { onError(displayMsg) }
             } catch (e: Throwable) {
                 val msg = "Authentication failed [${e::class.simpleName}]: ${e.localizedMessage ?: "Unexpected error"}"
                 Log.e(TAG, msg, e)
