@@ -133,7 +133,8 @@ class ScreenCaptureEncoder(private val context: Context) : AudioRouteChangeListe
     private var currentAudioSpecificConfig: ByteArray = byteArrayOf(0x11, 0x90.toByte())
 
     // Real-Time Audio Settings (Thread-safe)
-    @Volatile var micVolume: Float = 1.2f
+    @Volatile var micVolume: Float = 0.85f
+    @Volatile var micGain: Float = 0.85f
     @Volatile var gameVolume: Float = 1.0f
     @Volatile var isInternalAudioEnabled: Boolean = true
     @Volatile var isMicAudioEnabled: Boolean = true
@@ -142,6 +143,10 @@ class ScreenCaptureEncoder(private val context: Context) : AudioRouteChangeListe
     @Volatile var captureMode: AudioCaptureMode = AudioCaptureMode.INTERNAL_AND_MIC
     @Volatile var isNoiseSuppressionEnabled: Boolean = true
     @Volatile var isEchoCancellationEnabled: Boolean = true
+    @Volatile var isHighPassFilter100HzEnabled: Boolean = true
+
+    // Dedicated 100 Hz High-Pass Filter for clean speech without sub-bass rumble
+    private val micHighPassFilter = AudioProcessingUtils.HighPassFilter100Hz()
 
     // Audio Capture Error and Restriction State
     @Volatile var audioCaptureError: String? = null
@@ -166,6 +171,7 @@ class ScreenCaptureEncoder(private val context: Context) : AudioRouteChangeListe
 
     fun updateAudioConfig(config: AudioMixConfig) {
         micVolume = config.micAudioVolume
+        micGain = config.micGain
         gameVolume = config.gameAudioVolume
         isInternalAudioEnabled = config.isInternalAudioEnabled
         isMicAudioEnabled = config.isMicAudioEnabled
@@ -174,9 +180,10 @@ class ScreenCaptureEncoder(private val context: Context) : AudioRouteChangeListe
         captureMode = config.audioCaptureMode
         isNoiseSuppressionEnabled = config.isNoiseSuppressionEnabled
         isEchoCancellationEnabled = config.isEchoCancellationEnabled
+        isHighPassFilter100HzEnabled = config.isHighPassFilter100HzEnabled
 
         applyMicHardwareEffects(config.isNoiseSuppressionEnabled, config.isEchoCancellationEnabled)
-        Log.d(TAG_AUDIO, "Audio config updated: mode=${captureMode.name}, internalEnabled=$isInternalAudioEnabled, micEnabled=$isMicAudioEnabled, micVol=$micVolume, gameVol=$gameVolume, muted=$isMicMuted, delay=${audioDelayMs}ms, noiseReduction=${config.isNoiseSuppressionEnabled}")
+        Log.d(TAG_AUDIO, "Audio config updated: mode=${captureMode.name}, internalEnabled=$isInternalAudioEnabled, micEnabled=$isMicAudioEnabled, micVol=$micVolume, micGain=$micGain, gameVol=$gameVolume, muted=$isMicMuted, delay=${audioDelayMs}ms, noiseReduction=${config.isNoiseSuppressionEnabled}, echoCancel=${config.isEchoCancellationEnabled}, hpFilter100Hz=${config.isHighPassFilter100HzEnabled}")
     }
 
     private fun applyMicHardwareEffects(enableNoiseReduction: Boolean, enableEchoCancellation: Boolean) {
@@ -299,6 +306,13 @@ class ScreenCaptureEncoder(private val context: Context) : AudioRouteChangeListe
 
         activeProjection = projection
         isRunning.set(true)
+
+        // Stop and release any standalone monitoring AudioRecord in the application to prevent duplicate capture
+        try {
+            val app = context.applicationContext as? com.example.ViperStudioApplication
+            app?.audioMixerEngine?.pauseStandaloneAudioRecord()
+        } catch (_: Exception) {}
+
         presentationTimeBaseUs.set(System.nanoTime() / 1000L)
         totalAudioFramesWritten.set(0)
 
@@ -724,29 +738,64 @@ class ScreenCaptureEncoder(private val context: Context) : AudioRouteChangeListe
 
     private fun createMicAudioRecord(bufferSize: Int): AudioRecord? {
         val record = try {
-            // Try Stereo first
-            val stereoRecord = AudioRecord(
-                MediaRecorder.AudioSource.MIC,
+            // Prioritize Mono: smartphone microphones are physically mono.
+            // Stereo capture causes the HAL to route the top noise-canceling mic to the right channel,
+            // resulting in dual-mic phase cancellation, 50/60Hz chassis buzzing, and muddy sub-bass rumble.
+            // Capturing Mono and upmixing cleanly to Stereo guarantees pristine, centered, in-phase vocal commentary.
+            val monoBufferSize = max(AudioRecord.getMinBufferSize(SAMPLE_RATE, AudioFormat.CHANNEL_IN_MONO, AudioFormat.ENCODING_PCM_16BIT) * 2, 4096)
+
+            // 1. Voice Recognition source: optimized for speech, flat vocal response, native sub-bass rejection, no telephone AGC
+            val voiceRec = AudioRecord(
+                MediaRecorder.AudioSource.VOICE_RECOGNITION,
                 SAMPLE_RATE,
-                AudioFormat.CHANNEL_IN_STEREO,
+                AudioFormat.CHANNEL_IN_MONO,
                 AudioFormat.ENCODING_PCM_16BIT,
-                bufferSize
+                monoBufferSize
             )
-            if (stereoRecord.state == AudioRecord.STATE_INITIALIZED) {
-                stereoRecord
+            if (voiceRec.state == AudioRecord.STATE_INITIALIZED) {
+                Log.i(TAG_AUDIO, "AudioRecord initialized with VOICE_RECOGNITION Mono at $SAMPLE_RATE Hz (Zero phase buzz).")
+                voiceRec
             } else {
-                stereoRecord.release()
-                // Fallback to Mono if device hardware mic requires mono
-                val monoRecord = AudioRecord(
+                voiceRec.release()
+                // 2. Standard MIC source with Mono
+                val micMono = AudioRecord(
                     MediaRecorder.AudioSource.MIC,
                     SAMPLE_RATE,
                     AudioFormat.CHANNEL_IN_MONO,
                     AudioFormat.ENCODING_PCM_16BIT,
-                    bufferSize
+                    monoBufferSize
                 )
-                if (monoRecord.state == AudioRecord.STATE_INITIALIZED) monoRecord else {
-                    monoRecord.release()
-                    null
+                if (micMono.state == AudioRecord.STATE_INITIALIZED) {
+                    Log.i(TAG_AUDIO, "AudioRecord initialized with MIC Mono at $SAMPLE_RATE Hz.")
+                    micMono
+                } else {
+                    micMono.release()
+                    // 3. Fallback: VOICE_COMMUNICATION Mono
+                    val voiceComm = AudioRecord(
+                        MediaRecorder.AudioSource.VOICE_COMMUNICATION,
+                        SAMPLE_RATE,
+                        AudioFormat.CHANNEL_IN_MONO,
+                        AudioFormat.ENCODING_PCM_16BIT,
+                        monoBufferSize
+                    )
+                    if (voiceComm.state == AudioRecord.STATE_INITIALIZED) {
+                        Log.i(TAG_AUDIO, "AudioRecord initialized with VOICE_COMMUNICATION Mono at $SAMPLE_RATE Hz.")
+                        voiceComm
+                    } else {
+                        voiceComm.release()
+                        // 4. Final fallback: Stereo MIC if device strictly requires stereo
+                        val stereo = AudioRecord(
+                            MediaRecorder.AudioSource.MIC,
+                            SAMPLE_RATE,
+                            AudioFormat.CHANNEL_IN_STEREO,
+                            AudioFormat.ENCODING_PCM_16BIT,
+                            bufferSize
+                        )
+                        if (stereo.state == AudioRecord.STATE_INITIALIZED) stereo else {
+                            stereo.release()
+                            null
+                        }
+                    }
                 }
             }
         } catch (e: Exception) {
@@ -770,12 +819,13 @@ class ScreenCaptureEncoder(private val context: Context) : AudioRouteChangeListe
     private fun startMultiThreadedAudioPipeline(codec: MediaCodec) {
         micJitterBuffer.clear()
         gameJitterBuffer.clear()
+        micHighPassFilter.reset()
 
         // 1. Independent Microphone Reader Thread
         micCaptureThread = Thread({
             Process.setThreadPriority(Process.THREAD_PRIORITY_URGENT_AUDIO)
-            val rawBuffer = ShortArray(FRAME_SHORTS)
-            val stereoBuffer = ShortArray(FRAME_SHORTS)
+            val monoBuffer = ShortArray(AudioProcessingUtils.FRAME_SIZE_STEREO_SAMPLES)
+            val stereoBuffer = ShortArray(AudioProcessingUtils.FRAME_SIZE_SHORTS)
 
             while (isAudioRunning.get()) {
                 val record = audioRecordMic
@@ -789,37 +839,51 @@ class ScreenCaptureEncoder(private val context: Context) : AudioRouteChangeListe
                 }
 
                 try {
-                    val read = record.read(rawBuffer, 0, rawBuffer.size)
-                    when {
-                        read > 0 -> {
-                            val isMono = record.channelCount == 1
-                            if (isMono) {
-                                AudioProcessingUtils.upmixMonoToStereo(rawBuffer, read, stereoBuffer)
-                                micJitterBuffer.push(stereoBuffer)
-                                liveMicLevel = if (isMicMuted || !isMicAudioEnabled) 0f else AudioProcessingUtils.calculateNormalizedLevel(stereoBuffer, read * 2)
-                            } else {
-                                if (read < rawBuffer.size) {
-                                    val partial = rawBuffer.copyOf(read)
-                                    micJitterBuffer.push(partial)
-                                } else {
-                                    micJitterBuffer.push(rawBuffer)
-                                }
-                                liveMicLevel = if (isMicMuted || !isMicAudioEnabled) 0f else AudioProcessingUtils.calculateNormalizedLevel(rawBuffer, read)
+                    val isMono = record.channelCount == 1
+                    if (isMono) {
+                        // For 21.33ms at 48kHz, mono has exactly 1024 samples
+                        val read = record.read(monoBuffer, 0, monoBuffer.size)
+                        when {
+                            read > 0 -> {
+                                val upmixedShorts = AudioProcessingUtils.upmixMonoToStereo(monoBuffer, read, stereoBuffer)
+                                val finalFrame = if (upmixedShorts == stereoBuffer.size) stereoBuffer else stereoBuffer.copyOf(upmixedShorts)
+                                micJitterBuffer.push(finalFrame)
+                                liveMicLevel = if (isMicMuted || !isMicAudioEnabled) 0f else AudioProcessingUtils.calculateNormalizedLevel(finalFrame, upmixedShorts)
                             }
+                            read == AudioRecord.ERROR_INVALID_OPERATION || read == AudioRecord.ERROR_DEAD_OBJECT -> {
+                                Log.w(TAG_AUDIO, "AudioRecord mic error ($read). Attempting smooth recovery...")
+                                audioAutoRecoveries.incrementAndGet()
+                                try {
+                                    record.stop()
+                                    record.release()
+                                } catch (_: Exception) {}
+                                Thread.sleep(100)
+                                audioRecordMic = createMicAudioRecord(max(AudioRecord.getMinBufferSize(SAMPLE_RATE, AudioFormat.CHANNEL_IN_MONO, AudioFormat.ENCODING_PCM_16BIT) * 2, 8192))
+                                audioRecordMic?.startRecording()
+                            }
+                            else -> Thread.sleep(5)
                         }
-                        read == AudioRecord.ERROR_INVALID_OPERATION || read == AudioRecord.ERROR_DEAD_OBJECT -> {
-                            Log.w(TAG_AUDIO, "AudioRecord mic error ($read). Attempting smooth recovery...")
-                            audioAutoRecoveries.incrementAndGet()
-                            try {
-                                record.stop()
-                                record.release()
-                            } catch (_: Exception) {}
-                            Thread.sleep(100)
-                            audioRecordMic = createMicAudioRecord(max(AudioRecord.getMinBufferSize(SAMPLE_RATE, AudioFormat.CHANNEL_IN_STEREO, AudioFormat.ENCODING_PCM_16BIT) * 2, 8192))
-                            audioRecordMic?.startRecording()
-                        }
-                        else -> {
-                            Thread.sleep(5)
+                    } else {
+                        // For stereo, read 2048 shorts (1024 interleaved frames)
+                        val read = record.read(stereoBuffer, 0, stereoBuffer.size)
+                        when {
+                            read > 0 -> {
+                                val finalFrame = if (read == stereoBuffer.size) stereoBuffer else stereoBuffer.copyOf(read)
+                                micJitterBuffer.push(finalFrame)
+                                liveMicLevel = if (isMicMuted || !isMicAudioEnabled) 0f else AudioProcessingUtils.calculateNormalizedLevel(finalFrame, read)
+                            }
+                            read == AudioRecord.ERROR_INVALID_OPERATION || read == AudioRecord.ERROR_DEAD_OBJECT -> {
+                                Log.w(TAG_AUDIO, "AudioRecord mic error ($read). Attempting smooth recovery...")
+                                audioAutoRecoveries.incrementAndGet()
+                                try {
+                                    record.stop()
+                                    record.release()
+                                } catch (_: Exception) {}
+                                Thread.sleep(100)
+                                audioRecordMic = createMicAudioRecord(max(AudioRecord.getMinBufferSize(SAMPLE_RATE, AudioFormat.CHANNEL_IN_STEREO, AudioFormat.ENCODING_PCM_16BIT) * 2, 8192))
+                                audioRecordMic?.startRecording()
+                            }
+                            else -> Thread.sleep(5)
                         }
                     }
                 } catch (e: Exception) {
@@ -911,15 +975,22 @@ class ScreenCaptureEncoder(private val context: Context) : AudioRouteChangeListe
                     micJitterBuffer.poll(micPcm)
                     gameJitterBuffer.poll(gamePcm)
 
-                    // Apply microphone software noise suppression if enabled (internal game audio unaffected)
+                    // 1. Apply 100 Hz High-Pass Filter if enabled (eliminates sub-bass rumble, 50/60Hz electrical hum, and chassis handling buzz)
+                    if (isHighPassFilter100HzEnabled && isMicAudioEnabled && !isMicMuted) {
+                        micHighPassFilter.processStereo(micPcm, micPcm.size)
+                    }
+
+                    // 2. Apply microphone software noise suppression ONLY if enabled.
+                    // When OFF, software processing is completely bypassed preserving raw microphone input.
                     if (isNoiseSuppressionEnabled && isMicAudioEnabled && !isMicMuted) {
                         AudioProcessingUtils.suppressMicNoise(micPcm, micPcm.size)
                     }
 
-                    // Software mixing with soft-clipping limiter and independent toggles
+                    // 3. Software mixing with calibrated mic gain, soft-clipping limiter, and independent toggles
                     AudioProcessingUtils.mixStereoPcm(
                         micPcm = micPcm,
                         micVolume = micVolume,
+                        micGain = micGain,
                         isMicMuted = isMicMuted,
                         isMicEnabled = isMicAudioEnabled,
                         gamePcm = gamePcm,
@@ -1153,6 +1224,7 @@ class ScreenCaptureEncoder(private val context: Context) : AudioRouteChangeListe
 
         micJitterBuffer.clear()
         gameJitterBuffer.clear()
+        micHighPassFilter.reset()
 
         activeProjection = null
         currentVideoFormat = null
@@ -1164,4 +1236,6 @@ class ScreenCaptureEncoder(private val context: Context) : AudioRouteChangeListe
         liveGameLevel = 0f
         Log.i(TAG_VIDEO, "ScreenCaptureEncoder fully stopped and clean.")
     }
+
+    fun isAudioCapturing(): Boolean = isAudioRunning.get() && (audioRecordMic != null || audioRecordGame != null)
 }

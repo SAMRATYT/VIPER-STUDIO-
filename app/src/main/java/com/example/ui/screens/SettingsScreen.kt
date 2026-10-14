@@ -588,7 +588,64 @@ fun SettingsScreen(
                     )
                 }
 
-                // Background Noise Reduction ON/OFF Toggle
+                // 100 Hz High-Pass Filter Toggle (Anti-Rumble & Anti-Buzz)
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.SpaceBetween,
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    Column(modifier = Modifier.weight(1f)) {
+                        Text(
+                            text = "100 Hz High-Pass Filter (Anti-Rumble)",
+                            fontSize = 12.sp,
+                            color = TextPrimary,
+                            fontWeight = FontWeight.SemiBold
+                        )
+                        Text(
+                            text = if (audioConfig.isHighPassFilter100HzEnabled)
+                                "ON: 2nd-order Butterworth filter blocks frequencies < 100 Hz. Eliminates 50/60 Hz electrical hum, sub-bass mud, and phone handling vibration. Recommended for Moto G96 5G."
+                            else
+                                "OFF: Full low-frequency spectrum passed without filtering.",
+                            fontSize = 10.sp,
+                            color = if (audioConfig.isHighPassFilter100HzEnabled) ViperGreen else TextMuted
+                        )
+                    }
+                    Spacer(modifier = Modifier.width(8.dp))
+                    Switch(
+                        checked = audioConfig.isHighPassFilter100HzEnabled,
+                        onCheckedChange = { viewModel.toggleHighPassFilter100Hz() },
+                        colors = SwitchDefaults.colors(checkedThumbColor = ViperGreen, checkedTrackColor = Color(0xFF00391A))
+                    )
+                }
+
+                // Microphone Preamp Input Gain
+                Column(modifier = Modifier.fillMaxWidth()) {
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        horizontalArrangement = Arrangement.SpaceBetween
+                    ) {
+                        Text("Microphone Preamp Gain", fontSize = 12.sp, color = TextPrimary, fontWeight = FontWeight.SemiBold)
+                        Text(
+                            text = "${(audioConfig.micGain * 100).toInt()}% (Calibrated: 85%)",
+                            fontSize = 11.sp,
+                            color = ViperCyan,
+                            fontWeight = FontWeight.Bold
+                        )
+                    }
+                    Text(
+                        text = "Calibrates input sensitivity to prevent ADC preamp clipping and buzzing on Moto and sensitive mics.",
+                        fontSize = 10.sp,
+                        color = TextMuted
+                    )
+                    Slider(
+                        value = audioConfig.micGain,
+                        onValueChange = { viewModel.setMicGain(it) },
+                        valueRange = 0.1f..2.0f,
+                        colors = SliderDefaults.colors(thumbColor = ViperCyan, activeTrackColor = ViperCyan, inactiveTrackColor = Color(0xFF202C40))
+                    )
+                }
+
+                // Background Noise Reduction Toggle
                 Row(
                     modifier = Modifier.fillMaxWidth(),
                     horizontalArrangement = Arrangement.SpaceBetween,
@@ -605,7 +662,7 @@ fun SettingsScreen(
                             text = if (audioConfig.isNoiseSuppressionEnabled)
                                 "ON: NoiseSuppressor active for mic input only. Preserves natural internal BGMI game audio."
                             else
-                                "OFF: Natural raw microphone and game audio. No processing applied.",
+                                "OFF: Completely disabled. Raw, unprocessed microphone and game audio.",
                             fontSize = 10.sp,
                             color = if (audioConfig.isNoiseSuppressionEnabled) ViperGreen else TextMuted
                         )
@@ -633,7 +690,14 @@ fun SettingsScreen(
                 ) {
                     Column(modifier = Modifier.weight(1f)) {
                         Text("Acoustic Echo Cancellation", fontSize = 12.sp, color = TextPrimary, fontWeight = FontWeight.SemiBold)
-                        Text("Prevents game speaker bleed into microphone", fontSize = 10.sp, color = TextMuted)
+                        Text(
+                            text = if (audioConfig.isEchoCancellationEnabled)
+                                "ON: Prevents game speaker bleed into microphone."
+                            else
+                                "OFF: Completely disabled. No echo cancellation processing applied.",
+                            fontSize = 10.sp,
+                            color = if (audioConfig.isEchoCancellationEnabled) ViperGreen else TextMuted
+                        )
                     }
                     Spacer(modifier = Modifier.width(8.dp))
                     Switch(

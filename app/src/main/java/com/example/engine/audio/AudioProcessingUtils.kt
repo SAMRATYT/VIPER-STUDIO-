@@ -46,11 +46,12 @@ object AudioProcessingUtils {
 
     /**
      * Mixes interleaved stereo PCM buffers from Microphone and Game playback capture
-     * with independent volume gain, mute handling, and selectable AudioCaptureMode.
+     * with independent volume gain, calibrated preamp gain, mute handling, and selectable AudioCaptureMode.
      */
     fun mixStereoPcm(
         micPcm: ShortArray,
         micVolume: Float,
+        micGain: Float = 1.0f,
         isMicMuted: Boolean,
         isMicEnabled: Boolean = true,
         gamePcm: ShortArray,
@@ -75,19 +76,20 @@ object AudioProcessingUtils {
             }
             AudioCaptureMode.MIC_ONLY -> {
                 // Mic only; game completely excluded
-                if (isMicMuted || !isMicEnabled || micVolume <= 0f) {
+                val effectiveMicVol = if (isMicMuted || !isMicEnabled) 0f else (micVolume * micGain)
+                if (effectiveMicVol <= 0f) {
                     outputPcm.fill(0, 0, count)
                 } else {
                     for (i in 0 until count) {
-                        val micSample = micPcm[i] * micVolume
+                        val micSample = micPcm[i] * effectiveMicVol
                         outputPcm[i] = softClip(micSample)
                     }
                 }
             }
             AudioCaptureMode.INTERNAL_AND_MIC -> {
                 // Independent toggles: when microphone is OFF, NEVER mix mic samples.
-                // When microphone is ON, mix both safely with soft-clipping limiter.
-                val effectiveMicVol = if (isMicMuted || !isMicEnabled) 0f else micVolume
+                // When microphone is ON, mix both safely with calibrated headroom and soft-clipping limiter.
+                val effectiveMicVol = if (isMicMuted || !isMicEnabled) 0f else (micVolume * micGain)
                 val effectiveGameVol = if (!isInternalAudioEnabled) 0f else gameVolume
 
                 if (effectiveMicVol <= 0f && effectiveGameVol <= 0f) {
@@ -104,9 +106,115 @@ object AudioProcessingUtils {
                     for (i in 0 until count) {
                         val micSample = micPcm[i] * effectiveMicVol
                         val gameSample = gamePcm[i] * effectiveGameVol
-                        outputPcm[i] = softClip(micSample + gameSample)
+                        // Summing with 0.88f headroom factor prevents simultaneous loud shouting + explosion slamming the limiter into distortion
+                        outputPcm[i] = softClip((micSample + gameSample) * 0.88f)
                     }
                 }
+            }
+        }
+    }
+
+    /**
+     * Overload for backwards compatibility with tests and callers omitting micGain.
+     */
+    fun mixStereoPcm(
+        micPcm: ShortArray,
+        micVolume: Float,
+        isMicMuted: Boolean,
+        isMicEnabled: Boolean = true,
+        gamePcm: ShortArray,
+        gameVolume: Float,
+        isInternalAudioEnabled: Boolean = true,
+        outputPcm: ShortArray,
+        mode: AudioCaptureMode
+    ) = mixStereoPcm(
+        micPcm = micPcm,
+        micVolume = micVolume,
+        micGain = 1.0f,
+        isMicMuted = isMicMuted,
+        isMicEnabled = isMicEnabled,
+        gamePcm = gamePcm,
+        gameVolume = gameVolume,
+        isInternalAudioEnabled = isInternalAudioEnabled,
+        outputPcm = outputPcm,
+        mode = mode
+    )
+
+    /**
+     * Dedicated 2nd-order Butterworth IIR High-Pass Filter with a 100 Hz cutoff frequency at 48,000 Hz.
+     * Eliminates sub-bass acoustic rumble, electrical 50/60 Hz hum, proximity effect 'mud',
+     * and smartphone chassis vibration (especially on Motorola and modern multi-mic devices).
+     *
+     * Transfer function H(z) = (b0 + b1*z^-1 + b2*z^-2) / (1 + a1*z^-1 + a2*z^-2)
+     * Normalized coefficients for fc = 100 Hz, fs = 48000 Hz, Q = 0.7071:
+     *   b0 =  0.9907868f
+     *   b1 = -1.9815736f
+     *   b2 =  0.9907868f
+     *   a1 = -1.9814885f
+     *   a2 =  0.9816578f
+     */
+    class HighPassFilter100Hz {
+        private var x1L = 0f
+        private var x2L = 0f
+        private var y1L = 0f
+        private var y2L = 0f
+
+        private var x1R = 0f
+        private var x2R = 0f
+        private var y1R = 0f
+        private var y2R = 0f
+
+        fun reset() {
+            x1L = 0f; x2L = 0f; y1L = 0f; y2L = 0f
+            x1R = 0f; x2R = 0f; y1R = 0f; y2R = 0f
+        }
+
+        fun processStereo(buffer: ShortArray, length: Int) {
+            val b0 = 0.9907868f
+            val b1 = -1.9815736f
+            val b2 = 0.9907868f
+            val a1 = -1.9814885f
+            val a2 = 0.9816578f
+
+            val safeLimit = length.coerceAtMost(buffer.size)
+            for (i in 0 until safeLimit step 2) {
+                val x0L = buffer[i].toFloat()
+                val y0L = b0 * x0L + b1 * x1L + b2 * x2L - a1 * y1L - a2 * y2L
+                x2L = x1L
+                x1L = x0L
+                y2L = y1L
+                y1L = y0L
+                buffer[i] = y0L.coerceIn(-32767f, 32767f).toInt().toShort()
+
+                val rIdx = i + 1
+                if (rIdx < safeLimit) {
+                    val x0R = buffer[rIdx].toFloat()
+                    val y0R = b0 * x0R + b1 * x1R + b2 * x2R - a1 * y1R - a2 * y2R
+                    x2R = x1R
+                    x1R = x0R
+                    y2R = y1R
+                    y1R = y0R
+                    buffer[rIdx] = y0R.coerceIn(-32767f, 32767f).toInt().toShort()
+                }
+            }
+        }
+
+        fun processMono(buffer: ShortArray, length: Int) {
+            val b0 = 0.9907868f
+            val b1 = -1.9815736f
+            val b2 = 0.9907868f
+            val a1 = -1.9814885f
+            val a2 = 0.9816578f
+
+            val safeLimit = length.coerceAtMost(buffer.size)
+            for (i in 0 until safeLimit) {
+                val x0 = buffer[i].toFloat()
+                val y0 = b0 * x0 + b1 * x1L + b2 * x2L - a1 * y1L - a2 * y2L
+                x2L = x1L
+                x1L = x0
+                y2L = y1L
+                y1L = y0
+                buffer[i] = y0.coerceIn(-32767f, 32767f).toInt().toShort()
             }
         }
     }

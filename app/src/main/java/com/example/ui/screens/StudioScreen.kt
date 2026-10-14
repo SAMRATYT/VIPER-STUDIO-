@@ -612,19 +612,52 @@ fun StudioScreen(
                     )
                 }
 
+                // Microphone Preamp Gain Slider (Prevents hardware clipping & distortion on Moto G / sensitive mics)
+                Column {
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        horizontalArrangement = Arrangement.SpaceBetween
+                    ) {
+                        Text("Mic Preamp Gain", fontSize = 11.sp, color = TextSecondary)
+                        Text(
+                            text = "${(audioConfig.micGain * 100).toInt()}% (Clean Headroom)",
+                            fontSize = 11.sp,
+                            color = ViperCyan,
+                            fontWeight = FontWeight.Medium
+                        )
+                    }
+                    Slider(
+                        value = audioConfig.micGain,
+                        onValueChange = { viewModel.setMicGain(it) },
+                        enabled = audioConfig.isMicAudioEnabled && !audioConfig.isMicMuted,
+                        valueRange = 0.1f..2.0f,
+                        colors = SliderDefaults.colors(
+                            thumbColor = Color(0xFF64FFDA),
+                            activeTrackColor = Color(0xFF64FFDA),
+                            inactiveTrackColor = Color(0xFF202C40)
+                        )
+                    )
+                }
+
                 // Audio Enhancement Toggles
                 Row(
                     modifier = Modifier.fillMaxWidth(),
-                    horizontalArrangement = Arrangement.spacedBy(8.dp)
+                    horizontalArrangement = Arrangement.spacedBy(6.dp)
                 ) {
                     QuickHudPill(
-                        label = "Noise Suppression",
+                        label = "100Hz Filter",
+                        isActive = audioConfig.isHighPassFilter100HzEnabled,
+                        onClick = { viewModel.toggleHighPassFilter100Hz() },
+                        modifier = Modifier.weight(1f)
+                    )
+                    QuickHudPill(
+                        label = "Noise Suppr.",
                         isActive = audioConfig.isNoiseSuppressionEnabled,
                         onClick = { viewModel.toggleNoiseSuppression() },
                         modifier = Modifier.weight(1f)
                     )
                     QuickHudPill(
-                        label = "Echo Cancellation",
+                        label = "Echo Cancel",
                         isActive = audioConfig.isEchoCancellationEnabled,
                         onClick = { viewModel.toggleEchoCancellation() },
                         modifier = Modifier.weight(1f)

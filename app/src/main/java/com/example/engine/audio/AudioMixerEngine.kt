@@ -70,6 +70,19 @@ class AudioMixerEngine(private val context: Context) {
         syncWithEncoder(updated)
     }
 
+    fun setMicGain(gain: Float) {
+        val updated = _config.value.copy(micGain = gain.coerceIn(0f, 2.0f))
+        _config.value = updated
+        syncWithEncoder(updated)
+    }
+
+    fun toggleHighPassFilter100Hz() {
+        val current = _config.value.isHighPassFilter100HzEnabled
+        val updated = _config.value.copy(isHighPassFilter100HzEnabled = !current)
+        _config.value = updated
+        syncWithEncoder(updated)
+    }
+
     fun toggleInternalAudio() {
         val current = _config.value.isInternalAudioEnabled
         val updated = _config.value.copy(isInternalAudioEnabled = !current)
@@ -128,6 +141,23 @@ class AudioMixerEngine(private val context: Context) {
         }
     }
 
+    fun pauseStandaloneAudioRecord() {
+        try {
+            echoCanceler?.release()
+            echoCanceler = null
+            noiseSuppressor?.release()
+            noiseSuppressor = null
+            if (audioRecord?.recordingState == AudioRecord.RECORDSTATE_RECORDING) {
+                audioRecord?.stop()
+            }
+            audioRecord?.release()
+            audioRecord = null
+            Log.i(TAG, "Standalone monitoring AudioRecord released to prevent duplicate mic capture.")
+        } catch (e: Exception) {
+            Log.w(TAG, "Error releasing standalone AudioRecord: ${e.message}")
+        }
+    }
+
     fun startAudioMonitoring() {
         if (captureJob?.isActive == true) return
 
@@ -136,8 +166,13 @@ class AudioMixerEngine(private val context: Context) {
             while (isActive) {
                 val encoder = ScreenCaptureEncoder.getInstance(context)
 
-                // If hardware screen capture is actively running, mirror live levels directly from hardware pipeline
-                if (encoder.liveMicLevel > 0f || encoder.liveGameLevel > 0f) {
+                // CRITICAL: Prevent duplicate microphone capture!
+                // If ScreenCaptureEncoder is actively capturing audio (recording or streaming),
+                // release our standalone monitoring AudioRecord immediately so only ONE AudioRecord accesses the mic.
+                if (encoder.isAudioCapturing()) {
+                    if (audioRecord != null) {
+                        pauseStandaloneAudioRecord()
+                    }
                     _micLevel.value = encoder.liveMicLevel
                     _gameLevel.value = encoder.liveGameLevel
                     delay(50)
@@ -164,7 +199,7 @@ class AudioMixerEngine(private val context: Context) {
                     try {
                         val read = audioRecord?.read(buffer, 0, buffer.size) ?: 0
                         if (read > 0) {
-                            currentMicLevel = AudioProcessingUtils.calculateNormalizedLevel(buffer, read) * cfg.micAudioVolume
+                            currentMicLevel = AudioProcessingUtils.calculateNormalizedLevel(buffer, read) * cfg.micAudioVolume * cfg.micGain
                         }
                     } catch (e: Exception) {
                         Log.w(TAG, "Audio record read error", e)
@@ -224,17 +259,29 @@ class AudioMixerEngine(private val context: Context) {
 
         try {
             if (AcousticEchoCanceler.isAvailable()) {
-                if (echoCanceler == null) {
-                    echoCanceler = AcousticEchoCanceler.create(session)
+                if (cfg.isEchoCancellationEnabled) {
+                    if (echoCanceler == null) {
+                        echoCanceler = AcousticEchoCanceler.create(session)
+                    }
+                    echoCanceler?.enabled = true
+                } else {
+                    echoCanceler?.enabled = false
+                    echoCanceler?.release()
+                    echoCanceler = null
                 }
-                echoCanceler?.enabled = cfg.isEchoCancellationEnabled
             }
 
             if (NoiseSuppressor.isAvailable()) {
-                if (noiseSuppressor == null) {
-                    noiseSuppressor = NoiseSuppressor.create(session)
+                if (cfg.isNoiseSuppressionEnabled) {
+                    if (noiseSuppressor == null) {
+                        noiseSuppressor = NoiseSuppressor.create(session)
+                    }
+                    noiseSuppressor?.enabled = true
+                } else {
+                    noiseSuppressor?.enabled = false
+                    noiseSuppressor?.release()
+                    noiseSuppressor = null
                 }
-                noiseSuppressor?.enabled = cfg.isNoiseSuppressionEnabled
             }
         } catch (e: Exception) {
             Log.w(TAG, "Audio effect binding exception", e)
@@ -244,19 +291,7 @@ class AudioMixerEngine(private val context: Context) {
     fun stopAudioMonitoring() {
         captureJob?.cancel()
         captureJob = null
-        try {
-            echoCanceler?.release()
-            echoCanceler = null
-            noiseSuppressor?.release()
-            noiseSuppressor = null
-            if (audioRecord?.recordingState == AudioRecord.RECORDSTATE_RECORDING) {
-                audioRecord?.stop()
-            }
-            audioRecord?.release()
-            audioRecord = null
-        } catch (e: Exception) {
-            Log.w(TAG, "Audio cleanup error", e)
-        }
+        pauseStandaloneAudioRecord()
         _micLevel.value = 0f
         _gameLevel.value = 0f
     }

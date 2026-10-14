@@ -56,12 +56,14 @@ enum class AudioCaptureMode(val displayName: String, val shortLabel: String) {
 
 data class AudioMixConfig(
     val gameAudioVolume: Float = 1.0f, // 0.0 to 2.0 (200% boost)
-    val micAudioVolume: Float = 1.2f,  // 0.0 to 2.0 (200% boost)
+    val micAudioVolume: Float = 0.85f, // 0.0 to 2.0 (calibrated for clear vocal headroom)
+    val micGain: Float = 0.85f,        // 0.0 to 2.0 (calibrated preamp gain, prevents hardware clipping)
     val isInternalAudioEnabled: Boolean = true,
     val isMicAudioEnabled: Boolean = true,
     val isMicMuted: Boolean = false,
     val isNoiseSuppressionEnabled: Boolean = true,
     val isEchoCancellationEnabled: Boolean = true,
+    val isHighPassFilter100HzEnabled: Boolean = true, // 100 Hz High-Pass Filter (eliminates sub-bass rumble and buzzing)
     val audioDelayMs: Int = 0,         // -500ms to +500ms sync delay
     val sampleRateHz: Int = 48000,
     val audioCaptureMode: AudioCaptureMode = AudioCaptureMode.INTERNAL_AND_MIC

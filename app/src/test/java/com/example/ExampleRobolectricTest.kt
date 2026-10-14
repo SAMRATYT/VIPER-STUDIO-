@@ -535,6 +535,82 @@ class ExampleRobolectricTest {
         for (i in 0 until 10) {
             assertEquals("When internal game audio is OFF, output must equal mic sample", 15000.toShort(), outPcm[i])
         }
+
+        // 4. Test Calibrated Mic Gain and Summing Limiter
+        AudioProcessingUtils.mixStereoPcm(
+            micPcm = micPcm,
+            micVolume = 1.0f,
+            micGain = 0.85f,
+            isMicMuted = false,
+            isMicEnabled = true,
+            gamePcm = gamePcm,
+            gameVolume = 1.0f,
+            isInternalAudioEnabled = true,
+            outputPcm = outPcm,
+            mode = AudioCaptureMode.INTERNAL_AND_MIC
+        )
+
+        for (i in 0 until 10) {
+            // (15000 * 0.85 + 10000) * 0.88 = (12750 + 10000) * 0.88 = 20020
+            assertTrue("Output with calibrated mic gain should not clip", outPcm[i] <= 32767)
+            assertTrue("Output should be well within comfortable linear range", outPcm[i] in 18000..22000)
+        }
+    }
+
+    @Test
+    fun `test 100 Hz high pass filter removes DC offset and sub-bass buzzing`() {
+        val filter = AudioProcessingUtils.HighPassFilter100Hz()
+
+        // 1. DC offset test: A constant signal (0 Hz frequency) should decay to 0
+        val dcBuffer = ShortArray(2048) { 16000.toShort() }
+        filter.processStereo(dcBuffer, dcBuffer.size)
+
+        // After 1024 stereo samples (~21.3ms at 48kHz), the DC component should be heavily attenuated
+        val tailSampleL = Math.abs(dcBuffer[dcBuffer.size - 2].toInt())
+        val tailSampleR = Math.abs(dcBuffer[dcBuffer.size - 1].toInt())
+        assertTrue("DC offset must be attenuated below 5000 (was 16000), got $tailSampleL", tailSampleL < 5000)
+        assertTrue("DC offset on Right channel must also be attenuated, got $tailSampleR", tailSampleR < 5000)
+
+        // 2. High-frequency pass test: 1000 Hz vocal tone should pass with minimal attenuation
+        filter.reset()
+        val sineBuffer = ShortArray(2048)
+        for (i in 0 until 1024) {
+            val s = (15000 * Math.sin(2.0 * Math.PI * 1000.0 * i / 48000.0)).toInt().toShort()
+            sineBuffer[i * 2] = s
+            sineBuffer[i * 2 + 1] = s
+        }
+        filter.processStereo(sineBuffer, sineBuffer.size)
+        // Check middle of the buffer (steady state)
+        val peakVal = sineBuffer.takeLast(500).map { Math.abs(it.toInt()) }.maxOrNull() ?: 0
+        assertTrue("1000 Hz vocal frequency should pass near full volume (>12000), got $peakVal", peakVal > 12000)
+    }
+
+    @Test
+    fun `test audio preferences persistence with micGain and 100Hz high pass filter`() {
+        val context = ApplicationProvider.getApplicationContext<Context>()
+        val prefsRepo = com.example.data.local.AppPreferencesRepository(context)
+
+        val customAudioConfig = com.example.data.model.AudioMixConfig(
+            gameAudioVolume = 0.9f,
+            micAudioVolume = 0.80f,
+            micGain = 0.75f,
+            isInternalAudioEnabled = true,
+            isMicAudioEnabled = true,
+            isMicMuted = false,
+            isNoiseSuppressionEnabled = false,
+            isEchoCancellationEnabled = false,
+            isHighPassFilter100HzEnabled = true
+        )
+
+        prefsRepo.saveAudioConfig(customAudioConfig)
+        val loaded = prefsRepo.loadAudioConfig()
+
+        assertEquals(0.9f, loaded.gameAudioVolume, 0.01f)
+        assertEquals(0.80f, loaded.micAudioVolume, 0.01f)
+        assertEquals(0.75f, loaded.micGain, 0.01f)
+        assertFalse("Noise reduction must persist as false when toggled OFF", loaded.isNoiseSuppressionEnabled)
+        assertFalse("Echo cancellation must persist as false when toggled OFF", loaded.isEchoCancellationEnabled)
+        assertTrue("100Hz high pass filter must persist as true", loaded.isHighPassFilter100HzEnabled)
     }
 
     @Test

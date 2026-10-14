@@ -28,6 +28,8 @@ class AppPreferencesRepository(context: Context) {
         private const val KEY_AUDIO_MODE = "key_audio_capture_mode"
         private const val KEY_GAME_VOLUME = "key_audio_game_volume"
         private const val KEY_MIC_VOLUME = "key_audio_mic_volume"
+        private const val KEY_MIC_GAIN = "key_audio_mic_gain"
+        private const val KEY_HIGH_PASS_FILTER_100HZ = "key_audio_high_pass_filter_100hz"
         private const val KEY_MIC_MUTED = "key_audio_mic_muted"
         private const val KEY_AUDIO_DELAY_MS = "key_audio_delay_ms"
 
@@ -56,12 +58,14 @@ class AppPreferencesRepository(context: Context) {
 
         return AudioMixConfig(
             gameAudioVolume = prefs.getFloat(KEY_GAME_VOLUME, 1.0f),
-            micAudioVolume = prefs.getFloat(KEY_MIC_VOLUME, 1.2f),
+            micAudioVolume = prefs.getFloat(KEY_MIC_VOLUME, 0.85f),
+            micGain = prefs.getFloat(KEY_MIC_GAIN, 0.85f),
             isInternalAudioEnabled = prefs.getBoolean("key_internal_audio_enabled", true),
             isMicAudioEnabled = prefs.getBoolean("key_mic_audio_enabled", true),
             isMicMuted = prefs.getBoolean(KEY_MIC_MUTED, false),
             isNoiseSuppressionEnabled = prefs.getBoolean(KEY_NOISE_SUPPRESSION, true),
             isEchoCancellationEnabled = prefs.getBoolean(KEY_ECHO_CANCELLATION, true),
+            isHighPassFilter100HzEnabled = prefs.getBoolean(KEY_HIGH_PASS_FILTER_100HZ, true),
             audioDelayMs = prefs.getInt(KEY_AUDIO_DELAY_MS, 0),
             sampleRateHz = 48000,
             audioCaptureMode = mode
@@ -72,9 +76,11 @@ class AppPreferencesRepository(context: Context) {
         prefs.edit().apply {
             putBoolean(KEY_NOISE_SUPPRESSION, config.isNoiseSuppressionEnabled)
             putBoolean(KEY_ECHO_CANCELLATION, config.isEchoCancellationEnabled)
+            putBoolean(KEY_HIGH_PASS_FILTER_100HZ, config.isHighPassFilter100HzEnabled)
             putString(KEY_AUDIO_MODE, config.audioCaptureMode.name)
             putFloat(KEY_GAME_VOLUME, config.gameAudioVolume)
             putFloat(KEY_MIC_VOLUME, config.micAudioVolume)
+            putFloat(KEY_MIC_GAIN, config.micGain)
             putBoolean("key_internal_audio_enabled", config.isInternalAudioEnabled)
             putBoolean("key_mic_audio_enabled", config.isMicAudioEnabled)
             putBoolean(KEY_MIC_MUTED, config.isMicMuted)

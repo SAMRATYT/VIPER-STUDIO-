@@ -519,6 +519,8 @@ class ViperStudioViewModel(application: Application) : AndroidViewModel(applicat
     // Audio Mixer setters
     fun setGameVolume(volume: Float) = audioEngine.setGameVolume(volume)
     fun setMicVolume(volume: Float) = audioEngine.setMicVolume(volume)
+    fun setMicGain(gain: Float) = audioEngine.setMicGain(gain)
+    fun toggleHighPassFilter100Hz() = audioEngine.toggleHighPassFilter100Hz()
     fun toggleInternalAudio() = audioEngine.toggleInternalAudio()
     fun toggleMicAudio() = audioEngine.toggleMicAudio()
     fun toggleMicMute() = audioEngine.toggleMicMute()
