@@ -26,38 +26,62 @@ android {
   // and updating Android apps in AI Studio.
   signingConfigs {
     create("release") {
-      val envPath = System.getenv("KEYSTORE_PATH")
-      val candidate = if (envPath != null) {
-        val direct = file(envPath)
-        if (direct.exists()) direct else rootProject.file(envPath)
-      } else {
-        rootProject.file("my-upload-key.jks")
+      val envPath = System.getenv("VIPER_KEYSTORE_PATH")
+        ?: System.getenv("KEYSTORE_PATH")
+        ?: System.getenv("DEBUG_KEYSTORE_PATH")
+      val candidate = when {
+        envPath != null -> {
+          val direct = file(envPath)
+          if (direct.exists()) direct else rootProject.file(envPath)
+        }
+        rootProject.file("viper-final.jks").exists() -> rootProject.file("viper-final.jks")
+        file("viper-final.jks").exists() -> file("viper-final.jks")
+        rootProject.file("my-upload-key.jks").exists() -> rootProject.file("my-upload-key.jks")
+        else -> rootProject.file("debug.keystore")
       }
       storeFile = candidate
-      storePassword = System.getenv("STORE_PASSWORD")
-      keyAlias = "upload"
-      keyPassword = System.getenv("KEY_PASSWORD")
+      val resolvedStorePassword = System.getenv("VIPER_STORE_PASSWORD")
+        ?: System.getenv("STORE_PASSWORD")
+        ?: System.getenv("DEBUG_STORE_PASSWORD")
+        ?: "android"
+      storePassword = resolvedStorePassword
+      keyAlias = System.getenv("VIPER_KEY_ALIAS")
+        ?: System.getenv("KEY_ALIAS")
+        ?: System.getenv("DEBUG_KEY_ALIAS")
+        ?: "upload"
+      keyPassword = System.getenv("VIPER_KEY_PASSWORD")
+        ?: System.getenv("KEY_PASSWORD")
+        ?: System.getenv("DEBUG_KEY_PASSWORD")
+        ?: resolvedStorePassword
     }
     create("debugConfig") {
-      val envPath = System.getenv("DEBUG_KEYSTORE_PATH") ?: System.getenv("KEYSTORE_PATH")
-      val candidate = if (envPath != null) {
-        val direct = file(envPath)
-        if (direct.exists()) direct else rootProject.file(envPath)
-      } else {
-        rootProject.file("debug.keystore")
+      val envPath = System.getenv("VIPER_KEYSTORE_PATH")
+        ?: System.getenv("DEBUG_KEYSTORE_PATH")
+        ?: System.getenv("KEYSTORE_PATH")
+      val candidate = when {
+        envPath != null -> {
+          val direct = file(envPath)
+          if (direct.exists()) direct else rootProject.file(envPath)
+        }
+        rootProject.file("viper-final.jks").exists() -> rootProject.file("viper-final.jks")
+        file("viper-final.jks").exists() -> file("viper-final.jks")
+        rootProject.file("debug.keystore").exists() -> rootProject.file("debug.keystore")
+        else -> rootProject.file("debug.keystore")
       }
       storeFile = if (candidate.exists()) candidate else rootProject.file("debug.keystore")
-      storePassword = System.getenv("DEBUG_STORE_PASSWORD")
-        ?: System.getenv("STORE_PASSWORD")
-        ?: "android"
-      keyAlias = System.getenv("DEBUG_KEY_ALIAS")
-        ?: System.getenv("KEY_ALIAS")
-        ?: "androiddebugkey"
-      keyPassword = System.getenv("DEBUG_KEY_PASSWORD")
-        ?: System.getenv("KEY_PASSWORD")
+      val resolvedStorePassword = System.getenv("VIPER_STORE_PASSWORD")
         ?: System.getenv("DEBUG_STORE_PASSWORD")
         ?: System.getenv("STORE_PASSWORD")
         ?: "android"
+      storePassword = resolvedStorePassword
+      keyAlias = System.getenv("VIPER_KEY_ALIAS")
+        ?: System.getenv("DEBUG_KEY_ALIAS")
+        ?: System.getenv("KEY_ALIAS")
+        ?: "androiddebugkey"
+      keyPassword = System.getenv("VIPER_KEY_PASSWORD")
+        ?: System.getenv("DEBUG_KEY_PASSWORD")
+        ?: System.getenv("KEY_PASSWORD")
+        ?: resolvedStorePassword
     }
   }
 

@@ -65,56 +65,183 @@ jobs:
           gradle-version: '9.3.1'
 
       - name: Restore persistent signing keystore
+        env:
+          VIPER_KEYSTORE_BASE64: ${{ secrets.VIPER_KEYSTORE_BASE64 }}
+          DEBUG_KEYSTORE_BASE64: ${{ secrets.DEBUG_KEYSTORE_BASE64 }}
+          VIPER_STORE_PASSWORD: ${{ secrets.VIPER_STORE_PASSWORD }}
+          VIPER_KEY_PASSWORD: ${{ secrets.VIPER_KEY_PASSWORD }}
+          VIPER_KEY_ALIAS: ${{ secrets.VIPER_KEY_ALIAS }}
+          STORE_PASSWORD: ${{ secrets.STORE_PASSWORD }}
+          DEBUG_STORE_PASSWORD: ${{ secrets.DEBUG_STORE_PASSWORD }}
+          KEY_PASSWORD: ${{ secrets.KEY_PASSWORD }}
+          DEBUG_KEY_PASSWORD: ${{ secrets.DEBUG_KEY_PASSWORD }}
+          KEY_ALIAS: ${{ secrets.KEY_ALIAS }}
+          DEBUG_KEY_ALIAS: ${{ secrets.DEBUG_KEY_ALIAS }}
         run: |
-          KEYSTORE_PATH="./debug.keystore"
-          if [ -n "${{ secrets.VIPER_KEYSTORE_BASE64 }}" ]; then
+          echo "=== Detecting & Restoring Signing Keystore ==="
+          ACTIVE_KEYSTORE_FILE=""
+          IS_CUSTOM_KEYSTORE=false
+
+          if [ -n "${VIPER_KEYSTORE_BASE64}" ]; then
             echo "Restoring persistent keystore from GitHub Secret VIPER_KEYSTORE_BASE64..."
-            echo "${{ secrets.VIPER_KEYSTORE_BASE64 }}" | tr -d '\r\n\t ' | base64 -d > "${KEYSTORE_PATH}"
-          elif [ -n "${{ secrets.DEBUG_KEYSTORE_BASE64 }}" ]; then
+            python3 -c "
+import os, base64, sys
+raw = os.environ.get('VIPER_KEYSTORE_BASE64', '')
+data = ''.join(raw.split())
+if not data:
+    sys.exit('VIPER_KEYSTORE_BASE64 is empty')
+try:
+    decoded = base64.b64decode(data)
+    with open('viper-final.jks', 'wb') as f:
+        f.write(decoded)
+    print(f'Successfully decoded {len(decoded)} bytes into viper-final.jks')
+except Exception as e:
+    sys.exit(f'Failed to base64-decode VIPER_KEYSTORE_BASE64: {e}')
+"
+            ACTIVE_KEYSTORE_FILE="./viper-final.jks"
+            cp -f "./viper-final.jks" "./debug.keystore"
+            IS_CUSTOM_KEYSTORE=true
+          elif [ -f "./viper-final.jks" ] && [ -s "./viper-final.jks" ]; then
+            echo "Found existing viper-final.jks in repository."
+            ACTIVE_KEYSTORE_FILE="./viper-final.jks"
+            cp -f "./viper-final.jks" "./debug.keystore"
+            IS_CUSTOM_KEYSTORE=true
+          elif [ -n "${DEBUG_KEYSTORE_BASE64}" ]; then
             echo "Restoring persistent keystore from GitHub Secret DEBUG_KEYSTORE_BASE64..."
-            echo "${{ secrets.DEBUG_KEYSTORE_BASE64 }}" | tr -d '\r\n\t ' | base64 -d > "${KEYSTORE_PATH}"
-          elif [ -f "${KEYSTORE_PATH}" ]; then
-            echo "Persistent keystore already exists at ${KEYSTORE_PATH}."
-          elif [ -f "./debug.keystore.base64" ]; then
+            python3 -c "
+import os, base64, sys
+raw = os.environ.get('DEBUG_KEYSTORE_BASE64', '')
+data = ''.join(raw.split())
+if not data:
+    sys.exit('DEBUG_KEYSTORE_BASE64 is empty')
+try:
+    decoded = base64.b64decode(data)
+    with open('debug.keystore', 'wb') as f:
+        f.write(decoded)
+    print(f'Successfully decoded {len(decoded)} bytes into debug.keystore')
+except Exception as e:
+    sys.exit(f'Failed to base64-decode DEBUG_KEYSTORE_BASE64: {e}')
+"
+            ACTIVE_KEYSTORE_FILE="./debug.keystore"
+            IS_CUSTOM_KEYSTORE=false
+          elif [ -f "./debug.keystore" ] && [ -s "./debug.keystore" ]; then
+            echo "Using existing repository debug.keystore."
+            ACTIVE_KEYSTORE_FILE="./debug.keystore"
+            IS_CUSTOM_KEYSTORE=false
+          elif [ -f "./debug.keystore.base64" ] && [ -s "./debug.keystore.base64" ]; then
             echo "Restoring persistent keystore from repository debug.keystore.base64..."
-            cat ./debug.keystore.base64 | tr -d '\r\n\t ' | base64 -d > "${KEYSTORE_PATH}"
+            python3 -c "
+import base64
+with open('debug.keystore.base64', 'r') as f:
+    raw = f.read()
+data = ''.join(raw.split())
+decoded = base64.b64decode(data)
+with open('debug.keystore', 'wb') as out:
+    out.write(decoded)
+print(f'Restored {len(decoded)} bytes into debug.keystore')
+"
+            ACTIVE_KEYSTORE_FILE="./debug.keystore"
+            IS_CUSTOM_KEYSTORE=false
           else
-            echo "ERROR: Persistent debug.keystore or debug.keystore.base64 missing! Refusing to generate a random key that breaks Firebase Google Sign-In and APK updates."
+            echo "::error::No persistent signing keystore found! Looked for VIPER_KEYSTORE_BASE64, viper-final.jks, DEBUG_KEYSTORE_BASE64, debug.keystore, and debug.keystore.base64."
+            echo "Refusing to generate a random key that breaks Firebase Google Sign-In and APK update compatibility."
             exit 1
           fi
 
-          if [ ! -f "${KEYSTORE_PATH}" ] || [ ! -s "${KEYSTORE_PATH}" ]; then
-            echo "ERROR: Keystore file ${KEYSTORE_PATH} is missing or empty (0 bytes) after restore."
+          if [ ! -f "${ACTIVE_KEYSTORE_FILE}" ] || [ ! -s "${ACTIVE_KEYSTORE_FILE}" ]; then
+            echo "::error::Keystore file ${ACTIVE_KEYSTORE_FILE} is missing or empty (0 bytes) after restore."
             exit 1
           fi
 
-          STORE_PASS="${{ secrets.VIPER_STORE_PASSWORD || secrets.DEBUG_STORE_PASSWORD || secrets.STORE_PASSWORD || 'android' }}"
-          KEY_ALIAS="${{ secrets.VIPER_KEY_ALIAS || secrets.DEBUG_KEY_ALIAS || secrets.KEY_ALIAS || 'androiddebugkey' }}"
+          # Password resolution: do NOT assume password is android for a custom keystore
+          STORE_PASS="${VIPER_STORE_PASSWORD:-${STORE_PASSWORD:-${DEBUG_STORE_PASSWORD}}}"
+          if [ "${IS_CUSTOM_KEYSTORE}" = true ]; then
+            if [ -z "${STORE_PASS}" ]; then
+              echo "::error::Custom signing keystore (viper-final.jks / VIPER_KEYSTORE_BASE64) detected, but VIPER_STORE_PASSWORD is not set in GitHub Secrets!"
+              echo "Do NOT assume the password is 'android' for a custom keystore."
+              echo "Please configure VIPER_STORE_PASSWORD in repository Settings -> Secrets and variables -> Actions."
+              exit 1
+            fi
+          else
+            if [ -z "${STORE_PASS}" ]; then
+              STORE_PASS="android"
+            fi
+          fi
 
-          echo "=== Verifying Keystore Integrity ==="
-          if ! "${JAVA_HOME}/bin/keytool" -list -keystore "${KEYSTORE_PATH}" -storepass "${STORE_PASS}" > /dev/null 2>&1; then
-            echo "ERROR: Keystore password verification failed. If using a custom keystore, configure VIPER_STORE_PASSWORD in GitHub Secrets."
+          echo "=== Validating Keystore Integrity with keytool ==="
+          KEYTOOL_OUT=$(mktemp)
+          if ! "${JAVA_HOME}/bin/keytool" -list -keystore "${ACTIVE_KEYSTORE_FILE}" -storepass "${STORE_PASS}" > "${KEYTOOL_OUT}" 2>&1; then
+            echo "::error::Keystore password verification failed for ${ACTIVE_KEYSTORE_FILE}!"
+            echo "keytool error output (passwords hidden):"
+            grep -iE "error|exception|tampered|password|format" "${KEYTOOL_OUT}" || cat "${KEYTOOL_OUT}"
+            rm -f "${KEYTOOL_OUT}"
+            echo ""
+            echo "Troubleshooting steps:"
+            echo "1. Verify that VIPER_STORE_PASSWORD in GitHub Secrets matches the exact store password of viper-final.jks."
+            echo "2. If using VIPER_KEYSTORE_BASE64, make sure the entire base64 string was copied without missing characters or extra spaces."
+            echo "3. Generate the base64 string with: base64 -w 0 viper-final.jks (Linux) or base64 -i viper-final.jks (macOS)."
             exit 1
           fi
 
-          if ! "${JAVA_HOME}/bin/keytool" -list -keystore "${KEYSTORE_PATH}" -storepass "${STORE_PASS}" -alias "${KEY_ALIAS}" > /dev/null 2>&1; then
-            echo "ERROR: Key alias '${KEY_ALIAS}' not found in keystore. Available entries in keystore:"
-            "${JAVA_HOME}/bin/keytool" -list -keystore "${KEYSTORE_PATH}" -storepass "${STORE_PASS}" || true
-            echo "If your key alias is different, configure VIPER_KEY_ALIAS in GitHub Secrets."
+          # Resolve key alias
+          KEY_ALIAS="${VIPER_KEY_ALIAS:-${KEY_ALIAS:-${DEBUG_KEY_ALIAS}}}"
+          if [ -z "${KEY_ALIAS}" ]; then
+            DETECTED_ALIAS=$(grep -E ", (PrivateKeyEntry|trustedCertEntry)" "${KEYTOOL_OUT}" | head -n 1 | awk -F',' '{print $1}' | xargs)
+            if [ -n "${DETECTED_ALIAS}" ]; then
+              echo "No VIPER_KEY_ALIAS specified. Automatically detected alias from keystore: '${DETECTED_ALIAS}'"
+              KEY_ALIAS="${DETECTED_ALIAS}"
+            elif [ "${IS_CUSTOM_KEYSTORE}" = false ]; then
+              KEY_ALIAS="androiddebugkey"
+            else
+              echo "::error::Could not find any key alias in ${ACTIVE_KEYSTORE_FILE}."
+              cat "${KEYTOOL_OUT}"
+              echo "Please configure VIPER_KEY_ALIAS in GitHub Secrets."
+              rm -f "${KEYTOOL_OUT}"
+              exit 1
+            fi
+          fi
+
+          # Validate key alias exists in keystore
+          if ! "${JAVA_HOME}/bin/keytool" -list -keystore "${ACTIVE_KEYSTORE_FILE}" -storepass "${STORE_PASS}" -alias "${KEY_ALIAS}" > "${KEYTOOL_OUT}" 2>&1; then
+            echo "::error::Key alias '${KEY_ALIAS}' not found in ${ACTIVE_KEYSTORE_FILE}!"
+            echo "Entries available in this keystore:"
+            "${JAVA_HOME}/bin/keytool" -list -keystore "${ACTIVE_KEYSTORE_FILE}" -storepass "${STORE_PASS}" | grep -E ", (PrivateKeyEntry|trustedCertEntry)" || true
+            echo "Please set the VIPER_KEY_ALIAS GitHub Secret to the correct alias name shown above."
+            rm -f "${KEYTOOL_OUT}"
             exit 1
           fi
+          rm -f "${KEYTOOL_OUT}"
+
+          # Resolve key password (defaults to store password if not specified)
+          KEY_PASS="${VIPER_KEY_PASSWORD:-${KEY_PASSWORD:-${DEBUG_KEY_PASSWORD:-${STORE_PASS}}}}"
 
           echo "=== Verified Keystore Certificate Fingerprints ==="
-          "${JAVA_HOME}/bin/keytool" -list -v -keystore "${KEYSTORE_PATH}" -storepass "${STORE_PASS}" -alias "${KEY_ALIAS}" | grep -E "SHA1:|SHA256:" || true
+          "${JAVA_HOME}/bin/keytool" -list -v -keystore "${ACTIVE_KEYSTORE_FILE}" -storepass "${STORE_PASS}" -alias "${KEY_ALIAS}" | grep -E "Owner:|Issuer:|SHA1:|SHA256:" || true
           echo "Persistent signing keystore verified successfully."
+
+          # Export validated environment variables for subsequent Gradle steps
+          ABS_KEYSTORE_PATH="${GITHUB_WORKSPACE}/${ACTIVE_KEYSTORE_FILE#./}"
+          echo "KEYSTORE_PATH=${ABS_KEYSTORE_PATH}" >> "$GITHUB_ENV"
+          echo "DEBUG_KEYSTORE_PATH=${ABS_KEYSTORE_PATH}" >> "$GITHUB_ENV"
+          echo "VIPER_KEYSTORE_PATH=${ABS_KEYSTORE_PATH}" >> "$GITHUB_ENV"
+          echo "STORE_PASSWORD=${STORE_PASS}" >> "$GITHUB_ENV"
+          echo "KEY_PASSWORD=${KEY_PASS}" >> "$GITHUB_ENV"
+          echo "KEY_ALIAS=${KEY_ALIAS}" >> "$GITHUB_ENV"
+          echo "VIPER_STORE_PASSWORD=${STORE_PASS}" >> "$GITHUB_ENV"
+          echo "VIPER_KEY_PASSWORD=${KEY_PASS}" >> "$GITHUB_ENV"
+          echo "VIPER_KEY_ALIAS=${KEY_ALIAS}" >> "$GITHUB_ENV"
 
       - name: Build the debug APK
         env:
-          KEYSTORE_PATH: ${{ github.workspace }}/debug.keystore
-          DEBUG_KEYSTORE_PATH: ${{ github.workspace }}/debug.keystore
-          STORE_PASSWORD: ${{ secrets.VIPER_STORE_PASSWORD || secrets.DEBUG_STORE_PASSWORD || secrets.STORE_PASSWORD || 'android' }}
-          KEY_PASSWORD: ${{ secrets.VIPER_KEY_PASSWORD || secrets.DEBUG_KEY_PASSWORD || secrets.KEY_PASSWORD || secrets.VIPER_STORE_PASSWORD || secrets.DEBUG_STORE_PASSWORD || secrets.STORE_PASSWORD || 'android' }}
-          KEY_ALIAS: ${{ secrets.VIPER_KEY_ALIAS || secrets.DEBUG_KEY_ALIAS || secrets.KEY_ALIAS || 'androiddebugkey' }}
+          KEYSTORE_PATH: ${{ env.KEYSTORE_PATH }}
+          DEBUG_KEYSTORE_PATH: ${{ env.DEBUG_KEYSTORE_PATH }}
+          VIPER_KEYSTORE_PATH: ${{ env.VIPER_KEYSTORE_PATH }}
+          STORE_PASSWORD: ${{ env.STORE_PASSWORD }}
+          KEY_PASSWORD: ${{ env.KEY_PASSWORD }}
+          KEY_ALIAS: ${{ env.KEY_ALIAS }}
+          VIPER_STORE_PASSWORD: ${{ env.VIPER_STORE_PASSWORD }}
+          VIPER_KEY_PASSWORD: ${{ env.VIPER_KEY_PASSWORD }}
+          VIPER_KEY_ALIAS: ${{ env.VIPER_KEY_ALIAS }}
         run: |
           gradle :app:assembleDebug --stacktrace --no-daemon
 
