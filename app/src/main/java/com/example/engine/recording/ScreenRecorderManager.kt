@@ -63,6 +63,18 @@ class ScreenRecorderManager(
     companion object {
         private const val TAG = "ScreenRecorderManager"
         private const val TAG_MUXER = "ViperMuxer"
+
+        fun isRunningUnderRobolectric(): Boolean {
+            return Build.FINGERPRINT.contains("robolectric", ignoreCase = true) ||
+                   Build.HARDWARE.contains("robolectric", ignoreCase = true) ||
+                   Build.PRODUCT.contains("robolectric", ignoreCase = true) ||
+                   Build.DEVICE.contains("robolectric", ignoreCase = true) ||
+                   try {
+                       Class.forName("org.robolectric.Robolectric") != null
+                   } catch (_: Throwable) {
+                       false
+                   }
+        }
     }
 
     private val scope = CoroutineScope(Dispatchers.IO)
@@ -481,11 +493,7 @@ class ScreenRecorderManager(
         }
 
         // 3. Hardware ScreenCaptureEncoder with MediaMuxer
-        val isHeadlessTest = try {
-            Class.forName("org.robolectric.Robolectric") != null
-        } catch (_: Exception) {
-            false
-        }
+        val isHeadlessTest = isRunningUnderRobolectric()
         val projection = StreamForegroundService.currentMediaProjection
         if (projection != null || isHeadlessTest) {
             attachRecordingPipeline(projection)
@@ -541,11 +549,7 @@ class ScreenRecorderManager(
                 return
             }
         } else {
-            val isHeadlessTest = try {
-                Class.forName("org.robolectric.Robolectric") != null
-            } catch (_: Exception) {
-                false
-            }
+            val isHeadlessTest = isRunningUnderRobolectric()
             if (isHeadlessTest) {
                 Log.i(TAG, "No active MediaProjection available in Robolectric test environment. Operating in test mode.")
             } else {
@@ -701,11 +705,7 @@ class ScreenRecorderManager(
                 ).also { currentStagingFile = it }
 
                 // Fallback check: If in Robolectric test environment where hardware displays/MediaProjection don't exist
-                val isHeadlessTest = try {
-                    Class.forName("org.robolectric.Robolectric") != null
-                } catch (_: Exception) {
-                    false
-                }
+                val isHeadlessTest = isRunningUnderRobolectric()
 
                 if (isHeadlessTest && (!validStaging.exists() || validStaging.length() < 1024L || recordedVideoFramesCount.get() == 0L || !verifyMp4Container(validStaging))) {
                     Log.i(TAG, "[RECORDER_VERIFY] Creating valid fallback MP4 structure for Robolectric test environment")

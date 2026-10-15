@@ -84,20 +84,20 @@ jobs:
 
           if [ -n "${VIPER_KEYSTORE_BASE64}" ]; then
             echo "Restoring persistent keystore from GitHub Secret VIPER_KEYSTORE_BASE64..."
-            python3 -c "
-import os, base64, sys
-raw = os.environ.get('VIPER_KEYSTORE_BASE64', '')
-data = ''.join(raw.split())
-if not data:
-    sys.exit('VIPER_KEYSTORE_BASE64 is empty')
-try:
-    decoded = base64.b64decode(data)
-    with open('viper-final.jks', 'wb') as f:
-        f.write(decoded)
-    print(f'Successfully decoded {len(decoded)} bytes into viper-final.jks')
-except Exception as e:
-    sys.exit(f'Failed to base64-decode VIPER_KEYSTORE_BASE64: {e}')
-"
+            python3 - << 'PY_EOF'
+          import os, base64, sys
+          raw = os.environ.get('VIPER_KEYSTORE_BASE64', '')
+          data = ''.join(raw.split())
+          if not data:
+              sys.exit('VIPER_KEYSTORE_BASE64 is empty')
+          try:
+              decoded = base64.b64decode(data)
+              with open('viper-final.jks', 'wb') as f:
+                  f.write(decoded)
+              print(f'Successfully decoded {len(decoded)} bytes into viper-final.jks')
+          except Exception as e:
+              sys.exit(f'Failed to base64-decode VIPER_KEYSTORE_BASE64: {e}')
+          PY_EOF
             ACTIVE_KEYSTORE_FILE="./viper-final.jks"
             cp -f "./viper-final.jks" "./debug.keystore"
             IS_CUSTOM_KEYSTORE=true
@@ -108,20 +108,20 @@ except Exception as e:
             IS_CUSTOM_KEYSTORE=true
           elif [ -n "${DEBUG_KEYSTORE_BASE64}" ]; then
             echo "Restoring persistent keystore from GitHub Secret DEBUG_KEYSTORE_BASE64..."
-            python3 -c "
-import os, base64, sys
-raw = os.environ.get('DEBUG_KEYSTORE_BASE64', '')
-data = ''.join(raw.split())
-if not data:
-    sys.exit('DEBUG_KEYSTORE_BASE64 is empty')
-try:
-    decoded = base64.b64decode(data)
-    with open('debug.keystore', 'wb') as f:
-        f.write(decoded)
-    print(f'Successfully decoded {len(decoded)} bytes into debug.keystore')
-except Exception as e:
-    sys.exit(f'Failed to base64-decode DEBUG_KEYSTORE_BASE64: {e}')
-"
+            python3 - << 'PY_EOF'
+          import os, base64, sys
+          raw = os.environ.get('DEBUG_KEYSTORE_BASE64', '')
+          data = ''.join(raw.split())
+          if not data:
+              sys.exit('DEBUG_KEYSTORE_BASE64 is empty')
+          try:
+              decoded = base64.b64decode(data)
+              with open('debug.keystore', 'wb') as f:
+                  f.write(decoded)
+              print(f'Successfully decoded {len(decoded)} bytes into debug.keystore')
+          except Exception as e:
+              sys.exit(f'Failed to base64-decode DEBUG_KEYSTORE_BASE64: {e}')
+          PY_EOF
             ACTIVE_KEYSTORE_FILE="./debug.keystore"
             IS_CUSTOM_KEYSTORE=false
           elif [ -f "./debug.keystore" ] && [ -s "./debug.keystore" ]; then
@@ -130,16 +130,16 @@ except Exception as e:
             IS_CUSTOM_KEYSTORE=false
           elif [ -f "./debug.keystore.base64" ] && [ -s "./debug.keystore.base64" ]; then
             echo "Restoring persistent keystore from repository debug.keystore.base64..."
-            python3 -c "
-import base64
-with open('debug.keystore.base64', 'r') as f:
-    raw = f.read()
-data = ''.join(raw.split())
-decoded = base64.b64decode(data)
-with open('debug.keystore', 'wb') as out:
-    out.write(decoded)
-print(f'Restored {len(decoded)} bytes into debug.keystore')
-"
+            python3 - << 'PY_EOF'
+          import base64
+          with open('debug.keystore.base64', 'r') as f:
+              raw = f.read()
+          data = ''.join(raw.split())
+          decoded = base64.b64decode(data)
+          with open('debug.keystore', 'wb') as out:
+              out.write(decoded)
+          print(f'Restored {len(decoded)} bytes into debug.keystore')
+          PY_EOF
             ACTIVE_KEYSTORE_FILE="./debug.keystore"
             IS_CUSTOM_KEYSTORE=false
           else
@@ -154,7 +154,7 @@ print(f'Restored {len(decoded)} bytes into debug.keystore')
           fi
 
           # Password resolution: do NOT assume password is android for a custom keystore
-          STORE_PASS="${VIPER_STORE_PASSWORD:-${STORE_PASSWORD:-${DEBUG_STORE_PASSWORD}}}"
+          STORE_PASS="${VIPER_STORE_PASSWORD:-${STORE_PASSWORD:-${DEBUG_STORE_PASSWORD:-}}}"
           if [ "${IS_CUSTOM_KEYSTORE}" = true ]; then
             if [ -z "${STORE_PASS}" ]; then
               echo "::error::Custom signing keystore (viper-final.jks / VIPER_KEYSTORE_BASE64) detected, but VIPER_STORE_PASSWORD is not set in GitHub Secrets!"
@@ -184,7 +184,7 @@ print(f'Restored {len(decoded)} bytes into debug.keystore')
           fi
 
           # Resolve key alias
-          KEY_ALIAS="${VIPER_KEY_ALIAS:-${KEY_ALIAS:-${DEBUG_KEY_ALIAS}}}"
+          KEY_ALIAS="${VIPER_KEY_ALIAS:-${KEY_ALIAS:-${DEBUG_KEY_ALIAS:-}}}"
           if [ -z "${KEY_ALIAS}" ]; then
             DETECTED_ALIAS=$(grep -E ", (PrivateKeyEntry|trustedCertEntry)" "${KEYTOOL_OUT}" | head -n 1 | awk -F',' '{print $1}' | xargs)
             if [ -n "${DETECTED_ALIAS}" ]; then
