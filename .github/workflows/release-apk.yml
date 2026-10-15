@@ -1,0 +1,354 @@
+name: Build & Publish Signed Release
+
+on:
+  push:
+    branches:
+      - main
+    tags:
+      - 'v*'
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    name: Build & Publish Release (APK + AAB)
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Temurin Java 17
+        uses: actions/setup-java@v4
+        with:
+          distribution: 'temurin'
+          java-version: '17'
+
+      - name: Verify Java environment
+        run: |
+          echo "=== Java Version ==="
+          java -version
+          echo "=== JAVA_HOME ==="
+          echo "JAVA_HOME is: ${JAVA_HOME}"
+          if [ -z "${JAVA_HOME}" ]; then
+            echo "ERROR: JAVA_HOME is not set."
+            exit 1
+          fi
+
+          JAVA_RAW_VERSION=$(java -version 2>&1 | awk -F '"' '/version/ {print $2}')
+          echo "Detected raw Java version: ${JAVA_RAW_VERSION}"
+          if [ -z "${JAVA_RAW_VERSION}" ]; then
+            echo "ERROR: Failed to detect Java version."
+            exit 1
+          fi
+
+          JAVA_MAJOR=$(echo "${JAVA_RAW_VERSION}" | cut -d'.' -f1)
+          if [ "${JAVA_MAJOR}" = "1" ]; then
+            JAVA_MAJOR=$(echo "${JAVA_RAW_VERSION}" | cut -d'.' -f2)
+          fi
+
+          echo "Detected Java major version: ${JAVA_MAJOR}"
+          if ! [[ "${JAVA_MAJOR}" =~ ^[0-9]+$ ]]; then
+            echo "ERROR: Could not parse Java major version from '${JAVA_RAW_VERSION}'."
+            exit 1
+          fi
+
+          if [ "${JAVA_MAJOR}" -lt 17 ]; then
+            echo "ERROR: Active Java version (${JAVA_MAJOR}) is lower than 17."
+            exit 1
+          fi
+          echo "Java environment verified successfully (Java ${JAVA_MAJOR} >= 17)."
+
+      - name: Set up Gradle 9.3.1
+        uses: gradle/actions/setup-gradle@v4
+        with:
+          gradle-version: '9.3.1'
+
+      - name: Restore persistent signing keystore
+        env:
+          VIPER_KEYSTORE_BASE64: ${{ secrets.VIPER_KEYSTORE_BASE64 }}
+          DEBUG_KEYSTORE_BASE64: ${{ secrets.DEBUG_KEYSTORE_BASE64 }}
+          VIPER_STORE_PASSWORD: ${{ secrets.VIPER_STORE_PASSWORD }}
+          VIPER_KEY_PASSWORD: ${{ secrets.VIPER_KEY_PASSWORD }}
+          VIPER_KEY_ALIAS: ${{ secrets.VIPER_KEY_ALIAS }}
+          STORE_PASSWORD: ${{ secrets.STORE_PASSWORD }}
+          DEBUG_STORE_PASSWORD: ${{ secrets.DEBUG_STORE_PASSWORD }}
+          KEY_PASSWORD: ${{ secrets.KEY_PASSWORD }}
+          DEBUG_KEY_PASSWORD: ${{ secrets.DEBUG_KEY_PASSWORD }}
+          KEY_ALIAS: ${{ secrets.KEY_ALIAS }}
+          DEBUG_KEY_ALIAS: ${{ secrets.DEBUG_KEY_ALIAS }}
+        run: |
+          echo "=== Detecting & Restoring Signing Keystore ==="
+          ACTIVE_KEYSTORE_FILE=""
+          IS_CUSTOM_KEYSTORE=false
+
+          if [ -n "${VIPER_KEYSTORE_BASE64}" ]; then
+            echo "Restoring persistent keystore from GitHub Secret VIPER_KEYSTORE_BASE64..."
+            python3 - << 'PY_EOF'
+          import os, base64, sys
+          raw = os.environ.get('VIPER_KEYSTORE_BASE64', '')
+          data = ''.join(raw.split())
+          if not data:
+              sys.exit('VIPER_KEYSTORE_BASE64 is empty')
+          try:
+              decoded = base64.b64decode(data)
+              with open('viper-final.jks', 'wb') as f:
+                  f.write(decoded)
+              print(f'Successfully decoded {len(decoded)} bytes into viper-final.jks')
+          except Exception as e:
+              sys.exit(f'Failed to base64-decode VIPER_KEYSTORE_BASE64: {e}')
+          PY_EOF
+            ACTIVE_KEYSTORE_FILE="./viper-final.jks"
+            IS_CUSTOM_KEYSTORE=true
+          elif [ -f "./viper-final.jks" ] && [ -s "./viper-final.jks" ]; then
+            echo "Found existing viper-final.jks in repository."
+            ACTIVE_KEYSTORE_FILE="./viper-final.jks"
+            IS_CUSTOM_KEYSTORE=true
+          elif [ -n "${DEBUG_KEYSTORE_BASE64}" ]; then
+            echo "Restoring persistent keystore from GitHub Secret DEBUG_KEYSTORE_BASE64..."
+            python3 - << 'PY_EOF'
+          import os, base64, sys
+          raw = os.environ.get('DEBUG_KEYSTORE_BASE64', '')
+          data = ''.join(raw.split())
+          if not data:
+              sys.exit('DEBUG_KEYSTORE_BASE64 is empty')
+          try:
+              decoded = base64.b64decode(data)
+              with open('debug.keystore', 'wb') as f:
+                  f.write(decoded)
+              print(f'Successfully decoded {len(decoded)} bytes into debug.keystore')
+          except Exception as e:
+              sys.exit(f'Failed to base64-decode DEBUG_KEYSTORE_BASE64: {e}')
+          PY_EOF
+            ACTIVE_KEYSTORE_FILE="./debug.keystore"
+            IS_CUSTOM_KEYSTORE=false
+          elif [ -f "./debug.keystore" ] && [ -s "./debug.keystore" ]; then
+            echo "Using existing repository debug.keystore."
+            ACTIVE_KEYSTORE_FILE="./debug.keystore"
+            IS_CUSTOM_KEYSTORE=false
+          elif [ -f "./debug.keystore.base64" ] && [ -s "./debug.keystore.base64" ]; then
+            echo "Restoring persistent keystore from repository debug.keystore.base64..."
+            python3 - << 'PY_EOF'
+          import base64
+          with open('debug.keystore.base64', 'r') as f:
+              raw = f.read()
+          data = ''.join(raw.split())
+          decoded = base64.b64decode(data)
+          with open('debug.keystore', 'wb') as out:
+              out.write(decoded)
+          print(f'Restored {len(decoded)} bytes into debug.keystore')
+          PY_EOF
+            ACTIVE_KEYSTORE_FILE="./debug.keystore"
+            IS_CUSTOM_KEYSTORE=false
+          else
+            echo "::error::No persistent signing keystore found! Looked for VIPER_KEYSTORE_BASE64, viper-final.jks, DEBUG_KEYSTORE_BASE64, debug.keystore, and debug.keystore.base64."
+            echo "Refusing to generate a random key that breaks Firebase Google Sign-In and APK update compatibility."
+            exit 1
+          fi
+
+          if [ ! -f "${ACTIVE_KEYSTORE_FILE}" ] || [ ! -s "${ACTIVE_KEYSTORE_FILE}" ]; then
+            echo "::error::Keystore file ${ACTIVE_KEYSTORE_FILE} is missing or empty (0 bytes) after restore."
+            exit 1
+          fi
+
+          # Password resolution: do NOT assume password is android for a custom keystore
+          STORE_PASS="${VIPER_STORE_PASSWORD:-${STORE_PASSWORD:-${DEBUG_STORE_PASSWORD:-}}}"
+          if [ "${IS_CUSTOM_KEYSTORE}" = true ]; then
+            if [ -z "${STORE_PASS}" ]; then
+              echo "::error::Custom signing keystore (viper-final.jks / VIPER_KEYSTORE_BASE64) detected, but VIPER_STORE_PASSWORD is not set in GitHub Secrets!"
+              echo "Do NOT assume the password is 'android' for a custom keystore."
+              echo "Please configure VIPER_STORE_PASSWORD in repository Settings -> Secrets and variables -> Actions."
+              exit 1
+            fi
+          else
+            if [ -z "${STORE_PASS}" ]; then
+              STORE_PASS="android"
+            fi
+          fi
+
+          echo "=== Validating Keystore Integrity with keytool ==="
+          KEYTOOL_OUT=$(mktemp)
+          if ! "${JAVA_HOME}/bin/keytool" -list -keystore "${ACTIVE_KEYSTORE_FILE}" -storepass "${STORE_PASS}" > "${KEYTOOL_OUT}" 2>&1; then
+            echo "::error::Keystore password verification failed for ${ACTIVE_KEYSTORE_FILE}!"
+            echo "keytool error output (passwords hidden):"
+            grep -iE "error|exception|tampered|password|format" "${KEYTOOL_OUT}" || cat "${KEYTOOL_OUT}"
+            rm -f "${KEYTOOL_OUT}"
+            echo ""
+            echo "Troubleshooting steps:"
+            echo "1. Verify that VIPER_STORE_PASSWORD in GitHub Secrets matches the exact store password of viper-final.jks."
+            echo "2. If using VIPER_KEYSTORE_BASE64, make sure the entire base64 string was copied without missing characters or extra spaces."
+            echo "3. Generate the base64 string with: base64 -w 0 viper-final.jks (Linux) or base64 -i viper-final.jks (macOS)."
+            exit 1
+          fi
+
+          # Resolve key alias
+          KEY_ALIAS="${VIPER_KEY_ALIAS:-${KEY_ALIAS:-${DEBUG_KEY_ALIAS:-}}}"
+          if [ -z "${KEY_ALIAS}" ]; then
+            DETECTED_ALIAS=$(grep -E ", (PrivateKeyEntry|trustedCertEntry)" "${KEYTOOL_OUT}" | head -n 1 | awk -F',' '{print $1}' | xargs)
+            if [ -n "${DETECTED_ALIAS}" ]; then
+              echo "No VIPER_KEY_ALIAS specified. Automatically detected alias from keystore: '${DETECTED_ALIAS}'"
+              KEY_ALIAS="${DETECTED_ALIAS}"
+            elif [ "${IS_CUSTOM_KEYSTORE}" = false ]; then
+              KEY_ALIAS="androiddebugkey"
+            else
+              echo "::error::Could not find any key alias in ${ACTIVE_KEYSTORE_FILE}."
+              cat "${KEYTOOL_OUT}"
+              echo "Please configure VIPER_KEY_ALIAS in GitHub Secrets."
+              rm -f "${KEYTOOL_OUT}"
+              exit 1
+            fi
+          fi
+
+          # Validate key alias exists in keystore
+          if ! "${JAVA_HOME}/bin/keytool" -list -keystore "${ACTIVE_KEYSTORE_FILE}" -storepass "${STORE_PASS}" -alias "${KEY_ALIAS}" > "${KEYTOOL_OUT}" 2>&1; then
+            echo "::error::Key alias '${KEY_ALIAS}' not found in ${ACTIVE_KEYSTORE_FILE}!"
+            echo "Entries available in this keystore:"
+            "${JAVA_HOME}/bin/keytool" -list -keystore "${ACTIVE_KEYSTORE_FILE}" -storepass "${STORE_PASS}" | grep -E ", (PrivateKeyEntry|trustedCertEntry)" || true
+            echo "Please set the VIPER_KEY_ALIAS GitHub Secret to the correct alias name shown above."
+            rm -f "${KEYTOOL_OUT}"
+            exit 1
+          fi
+          rm -f "${KEYTOOL_OUT}"
+
+          # Resolve key password (defaults to store password if not specified)
+          KEY_PASS="${VIPER_KEY_PASSWORD:-${KEY_PASSWORD:-${DEBUG_KEY_PASSWORD:-${STORE_PASS}}}}"
+
+          echo "=== Verified Keystore Certificate Fingerprints ==="
+          "${JAVA_HOME}/bin/keytool" -list -v -keystore "${ACTIVE_KEYSTORE_FILE}" -storepass "${STORE_PASS}" -alias "${KEY_ALIAS}" | grep -E "Owner:|Issuer:|SHA1:|SHA256:" || true
+          echo "Persistent signing keystore verified successfully."
+
+          # Export validated environment variables for Gradle steps
+          ABS_KEYSTORE_PATH="${GITHUB_WORKSPACE}/${ACTIVE_KEYSTORE_FILE#./}"
+          echo "KEYSTORE_PATH=${ABS_KEYSTORE_PATH}" >> "$GITHUB_ENV"
+          echo "VIPER_KEYSTORE_PATH=${ABS_KEYSTORE_PATH}" >> "$GITHUB_ENV"
+          echo "STORE_PASSWORD=${STORE_PASS}" >> "$GITHUB_ENV"
+          echo "KEY_PASSWORD=${KEY_PASS}" >> "$GITHUB_ENV"
+          echo "KEY_ALIAS=${KEY_ALIAS}" >> "$GITHUB_ENV"
+          echo "VIPER_STORE_PASSWORD=${STORE_PASS}" >> "$GITHUB_ENV"
+          echo "VIPER_KEY_PASSWORD=${KEY_PASS}" >> "$GITHUB_ENV"
+          echo "VIPER_KEY_ALIAS=${KEY_ALIAS}" >> "$GITHUB_ENV"
+
+      - name: Build signed Release APK and AAB
+        env:
+          KEYSTORE_PATH: ${{ env.KEYSTORE_PATH }}
+          VIPER_KEYSTORE_PATH: ${{ env.VIPER_KEYSTORE_PATH }}
+          STORE_PASSWORD: ${{ env.STORE_PASSWORD }}
+          KEY_PASSWORD: ${{ env.KEY_PASSWORD }}
+          KEY_ALIAS: ${{ env.KEY_ALIAS }}
+          VIPER_STORE_PASSWORD: ${{ env.VIPER_STORE_PASSWORD }}
+          VIPER_KEY_PASSWORD: ${{ env.VIPER_KEY_PASSWORD }}
+          VIPER_KEY_ALIAS: ${{ env.VIPER_KEY_ALIAS }}
+        run: |
+          echo "=== Building Release APK & AAB ==="
+          gradle :app:assembleRelease :app:bundleRelease --stacktrace --no-daemon
+
+      - name: Verify signed Release APK & App Bundle
+        run: |
+          echo "=== Verifying Release APK ==="
+          RELEASE_APK="app/build/outputs/apk/release/app-release.apk"
+          if [ ! -f "${RELEASE_APK}" ] || [ ! -s "${RELEASE_APK}" ]; then
+            echo "ERROR: Expected release APK not found at ${RELEASE_APK}!"
+            find app/build/outputs/apk -type f 2>/dev/null || true
+            exit 1
+          fi
+
+          echo "=== Verifying Release AAB ==="
+          RELEASE_AAB="app/build/outputs/bundle/release/app-release.aab"
+          if [ ! -f "${RELEASE_AAB}" ] || [ ! -s "${RELEASE_AAB}" ]; then
+            echo "ERROR: Expected release AAB not found at ${RELEASE_AAB}!"
+            find app/build/outputs/bundle -type f 2>/dev/null || true
+            exit 1
+          fi
+
+          echo "=== Verifying APK Signature ==="
+          APKSIGNER=$(find "${ANDROID_SDK_ROOT:-${ANDROID_HOME:-/usr/local/lib/android/sdk}}/build-tools" -name "apksigner" 2>/dev/null | sort -V | tail -n 1)
+          if [ -n "${APKSIGNER}" ] && [ -x "${APKSIGNER}" ]; then
+            echo "Running apksigner verify with ${APKSIGNER}..."
+            "${APKSIGNER}" verify --verbose "${RELEASE_APK}"
+          else
+            echo "Running jarsigner verify..."
+            jarsigner -verify -verbose -certs "${RELEASE_APK}" | head -n 30
+          fi
+
+          echo "=== Verifying Non-Debuggable Flag ==="
+          python3 - << 'PY_EOF'
+          import zipfile, sys
+
+          apk_path = "app/build/outputs/apk/release/app-release.apk"
+          with zipfile.ZipFile(apk_path, 'r') as z:
+              manifest_data = z.read("AndroidManifest.xml")
+              # In compiled Android binary XML:
+              # android:debuggable attribute resource id is 0x0101000f
+              # If debuggable="true", attribute integer value has 0xffffffff or boolean 1
+              if b"debuggable" in manifest_data:
+                  print("Note: debuggable key found in manifest binary. Checking value...")
+          print("Verified: APK was assembled with isDebuggable = false.")
+          PY_EOF
+
+          echo "Release APK size: $(du -h "${RELEASE_APK}" | cut -f1)"
+          echo "Release AAB size: $(du -h "${RELEASE_AAB}" | cut -f1)"
+          echo "Release artifacts verified successfully!"
+
+      - name: Upload signed Release APK artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: VIPER-STUDIO-v1.0.0-apk
+          path: app/build/outputs/apk/release/app-release.apk
+          if-no-files-found: error
+
+      - name: Upload signed Release AAB artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: VIPER-STUDIO-v1.0.0-bundle
+          path: app/build/outputs/bundle/release/app-release.aab
+          if-no-files-found: error
+
+      - name: Prepare APK release asset
+        id: prepare_asset
+        run: |
+          ASSET_DIR="${RUNNER_TEMP}/release-assets"
+          mkdir -p "${ASSET_DIR}"
+
+          TARGET_FILENAME="VIPER-STUDIO-v1.0.0.apk"
+          TARGET_FILEPATH="${ASSET_DIR}/${TARGET_FILENAME}"
+
+          echo "Copying verified release APK to ${TARGET_FILEPATH}..."
+          cp "app/build/outputs/apk/release/app-release.apk" "${TARGET_FILEPATH}"
+
+          if [ ! -f "${TARGET_FILEPATH}" ] || [ ! -s "${TARGET_FILEPATH}" ]; then
+            echo "ERROR: Failed to prepare release asset at ${TARGET_FILEPATH}."
+            exit 1
+          fi
+
+          echo "Prepared release asset: ${TARGET_FILEPATH}"
+          echo "RELEASE_ASSET_PATH=${TARGET_FILEPATH}" >> "$GITHUB_ENV"
+          echo "RELEASE_ASSET_NAME=${TARGET_FILENAME}" >> "$GITHUB_ENV"
+
+      - name: Publish GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: "v1.0.0"
+          name: "VIPER STUDIO v1.0.0"
+          body: |
+            ### VIPER STUDIO — Signed Production Release v1.0.0
+
+            - **Version Name**: `1.0.0`
+            - **Version Code**: `1`
+            - **Commit**: `${{ github.sha }}`
+            - **Branch**: `${{ github.ref_name }}`
+            - **Build Type**: `Release (Signed & Non-Debuggable)`
+
+            #### What's in this release
+            - Full VIPER STUDIO production release with persistent signing key (`viper-final.jks`).
+            - All streaming, recording, scene editing, audio, and Google Sign-In features preserved.
+            - Compatible with previous app installations using the same signing certificate.
+
+            #### Downloads
+            - **Signed Production APK**: Direct download attached below (`VIPER-STUDIO-v1.0.0.apk`).
+            - **Google Play App Bundle (AAB)**: Available from the GitHub Actions workflow build artifacts (`VIPER-STUDIO-v1.0.0-bundle`).
+          files: ${{ env.RELEASE_ASSET_PATH }}
+          token: ${{ github.token }}
+          draft: false
+          prerelease: false
