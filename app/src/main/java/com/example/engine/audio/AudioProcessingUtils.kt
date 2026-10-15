@@ -106,8 +106,7 @@ object AudioProcessingUtils {
                     for (i in 0 until count) {
                         val micSample = micPcm[i] * effectiveMicVol
                         val gameSample = gamePcm[i] * effectiveGameVol
-                        // Summing with 0.88f headroom factor prevents simultaneous loud shouting + explosion slamming the limiter into distortion
-                        outputPcm[i] = softClip((micSample + gameSample) * 0.88f)
+                        outputPcm[i] = softClip(micSample + gameSample)
                     }
                 }
             }

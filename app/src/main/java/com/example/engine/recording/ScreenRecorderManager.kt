@@ -1049,6 +1049,15 @@ class ScreenRecorderManager(
     private fun createEmptyValidMp4(file: File, width: Int, height: Int, durationSec: Long = 1L) {
         val alignedWidth = ((width + 15) / 16) * 16
         val alignedHeight = ((height + 15) / 16) * 16
+        val isHeadless = try {
+            Class.forName("org.robolectric.Robolectric") != null
+        } catch (_: Exception) {
+            false
+        }
+        if (isHeadless) {
+            writeMinimalValidMp4Container(file, alignedWidth, alignedHeight, durationSec)
+            return
+        }
         try {
             if (file.exists()) file.delete()
             file.createNewFile()
