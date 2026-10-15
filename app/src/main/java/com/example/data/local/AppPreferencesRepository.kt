@@ -169,7 +169,12 @@ class AppPreferencesRepository(context: Context) {
             streamKey = prefs.getString("yt_stream_key", "") ?: "",
             rtmpIngestUrl = prefs.getString("yt_ingest_url", "rtmp://a.rtmp.youtube.com/live2") ?: "rtmp://a.rtmp.youtube.com/live2",
             lastSyncTimeMs = prefs.getLong("yt_last_sync", 0L),
-            isYouTubeAuthorized = prefs.getBoolean("yt_is_authorized", false)
+            isYouTubeAuthorized = prefs.getBoolean("yt_is_authorized", false),
+            liveUrl = prefs.getString("yt_live_url", "") ?: "",
+            streamStatus = prefs.getString("yt_stream_status", "") ?: "",
+            lifeCycleStatus = prefs.getString("yt_lifecycle_status", "") ?: "",
+            isLiveVerified = prefs.getBoolean("yt_is_live_verified", false),
+            oauthAccessToken = prefs.getString("yt_oauth_token", "") ?: ""
         )
     }
 
@@ -190,6 +195,11 @@ class AppPreferencesRepository(context: Context) {
             putString("yt_ingest_url", info.rtmpIngestUrl)
             putLong("yt_last_sync", info.lastSyncTimeMs)
             putBoolean("yt_is_authorized", info.isYouTubeAuthorized)
+            putString("yt_live_url", info.liveUrl)
+            putString("yt_stream_status", info.streamStatus)
+            putString("yt_lifecycle_status", info.lifeCycleStatus)
+            putBoolean("yt_is_live_verified", info.isLiveVerified)
+            putString("yt_oauth_token", info.oauthAccessToken)
             apply()
         }
     }

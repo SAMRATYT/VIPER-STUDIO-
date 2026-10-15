@@ -328,9 +328,26 @@ class ScreenCaptureEncoder(private val context: Context) : AudioRouteChangeListe
 
         Log.i(
             TAG_VIDEO,
-            "ScreenCaptureEncoder pipeline started. Video: $successVideo, Audio: $successAudio (Orientation: ${if (isLandscape) "Landscape 16:9" else "Portrait 9:16"}, ${resolution.label}, $targetFps fps, $bitrateKbps kbps)"
+            "ScreenCaptureEncoder pipeline started. Video: $successVideo, Audio: $successAudio"
         )
         return successVideo
+    }
+
+    fun isCapturing(): Boolean = isRunning.get() && isVideoRunning.get()
+
+    fun updateBitrate(bitrateKbps: Int) {
+        val codec = videoCodec ?: return
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.KITKAT) {
+            try {
+                val params = Bundle().apply {
+                    putInt(MediaCodec.PARAMETER_KEY_VIDEO_BITRATE, (bitrateKbps * 1000).coerceIn(500000, 15000000))
+                }
+                codec.setParameters(params)
+                Log.i(TAG_VIDEO, "Dynamically updated video encoder bitrate to $bitrateKbps kbps")
+            } catch (e: Exception) {
+                Log.w(TAG_VIDEO, "Failed to dynamically adjust bitrate: ${e.message}")
+            }
+        }
     }
 
     @SuppressLint("WrongConstant")
@@ -361,7 +378,21 @@ class ScreenCaptureEncoder(private val context: Context) : AudioRouteChangeListe
             }
 
             val fpsVal = targetFps.coerceIn(24, 60)
-            val bitrateVal = (bitrateKbps * 1000).coerceIn(1000000, 15000000)
+            val bitrateVal = (bitrateKbps * 1000).coerceIn(500000, 15000000)
+
+            var codec: MediaCodec? = null
+            try {
+                codec = selectHardwareEncoder(mimeType)
+            } catch (_: Exception) {}
+            if (codec == null) {
+                codec = MediaCodec.createEncoderByType(mimeType)
+            }
+
+            val caps = try {
+                codec.codecInfo.getCapabilitiesForType(mimeType)
+            } catch (_: Exception) {
+                null
+            }
 
             val format = MediaFormat.createVideoFormat(mimeType, targetWidth, targetHeight).apply {
                 setInteger(MediaFormat.KEY_COLOR_FORMAT, MediaCodecInfo.CodecCapabilities.COLOR_FormatSurface)
@@ -370,14 +401,28 @@ class ScreenCaptureEncoder(private val context: Context) : AudioRouteChangeListe
                 setInteger(MediaFormat.KEY_CAPTURE_RATE, fpsVal)
                 setFloat(MediaFormat.KEY_OPERATING_RATE, fpsVal.toFloat())
                 setInteger(MediaFormat.KEY_PRIORITY, 0)
-                setInteger(MediaFormat.KEY_I_FRAME_INTERVAL, 1) // 1-second interval guarantees prompt keyframe delivery
+                setInteger(MediaFormat.KEY_I_FRAME_INTERVAL, 2) // Standard 2-second GOP for YouTube Live RTMP
+
+                // Prefer CBR (Constant Bitrate) for exact bitrate adherence and eliminating overshoot
+                val encCaps = caps?.encoderCapabilities
+                val bitrateMode = when {
+                    encCaps?.isBitrateModeSupported(MediaCodecInfo.EncoderCapabilities.BITRATE_MODE_CBR) == true -> {
+                        Log.i(TAG_VIDEO, "Hardware encoder supports BITRATE_MODE_CBR. Configured CBR at $bitrateKbps kbps.")
+                        MediaCodecInfo.EncoderCapabilities.BITRATE_MODE_CBR
+                    }
+                    encCaps?.isBitrateModeSupported(MediaCodecInfo.EncoderCapabilities.BITRATE_MODE_VBR) == true -> {
+                        Log.i(TAG_VIDEO, "BITRATE_MODE_CBR not supported, fallback to BITRATE_MODE_VBR at $bitrateKbps kbps.")
+                        MediaCodecInfo.EncoderCapabilities.BITRATE_MODE_VBR
+                    }
+                    else -> MediaCodecInfo.EncoderCapabilities.BITRATE_MODE_VBR
+                }
                 try {
-                    setInteger(MediaFormat.KEY_BITRATE_MODE, MediaCodecInfo.EncoderCapabilities.BITRATE_MODE_VBR)
+                    setInteger(MediaFormat.KEY_BITRATE_MODE, bitrateMode)
                 } catch (_: Exception) {}
 
-                val repeatUs = (1_000_000L / fpsVal).coerceAtLeast(16_666L)
+                // Use 1,000,000L us (1.0s) keep-alive only, NOT 16ms/33ms which duplicates frames and doubles bitrate
                 try {
-                    setLong(MediaFormat.KEY_REPEAT_PREVIOUS_FRAME_AFTER, repeatUs)
+                    setLong(MediaFormat.KEY_REPEAT_PREVIOUS_FRAME_AFTER, 1_000_000L)
                 } catch (_: Exception) {}
 
                 if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M) {
@@ -387,19 +432,11 @@ class ScreenCaptureEncoder(private val context: Context) : AudioRouteChangeListe
                 }
             }
 
-            var codec: MediaCodec? = null
             try {
-                codec = selectHardwareEncoder(mimeType)
-                if (codec != null) {
-                    codec.configure(format, null, null, MediaCodec.CONFIGURE_FLAG_ENCODE)
-                }
+                codec.configure(format, null, null, MediaCodec.CONFIGURE_FLAG_ENCODE)
             } catch (e: Exception) {
-                Log.w(TAG_VIDEO, "Hardware encoder configure warning (${e.message}), trying createEncoderByType", e)
-                try { codec?.release() } catch (_: Exception) {}
-                codec = null
-            }
-
-            if (codec == null) {
+                Log.w(TAG_VIDEO, "Hardware encoder configure warning (${e.message}), recreating encoder", e)
+                try { codec.release() } catch (_: Exception) {}
                 codec = MediaCodec.createEncoderByType(mimeType)
                 codec.configure(format, null, null, MediaCodec.CONFIGURE_FLAG_ENCODE)
             }

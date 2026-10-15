@@ -58,6 +58,8 @@ class RtmpStreamEngine(private val context: Context) {
     private var frameCounter: Long = 0
     private var droppedCounter: Long = 0
     private val totalBytesSent = AtomicLong(0)
+    private val hasReceivedRealVideoFrames = AtomicBoolean(false)
+    private val hasReceivedRealAudioFrames = AtomicBoolean(false)
     private var reconnectAttempts = 0
     private val maxReconnectAttempts = 5
 
@@ -98,6 +100,7 @@ class RtmpStreamEngine(private val context: Context) {
             val out = outputStream ?: return
             if (!_stats.value.isStreaming) return
 
+            hasReceivedRealVideoFrames.set(true)
             val currentTs = if (bufferInfo.presentationTimeUs > 0) {
                 if (firstSamplePtsUs == -1L) {
                     firstSamplePtsUs = bufferInfo.presentationTimeUs
@@ -152,6 +155,8 @@ class RtmpStreamEngine(private val context: Context) {
         override fun onAudioSampleAvailable(byteBuffer: ByteBuffer, bufferInfo: MediaCodec.BufferInfo) {
             val out = outputStream ?: return
             if (!_stats.value.isStreaming) return
+
+            hasReceivedRealAudioFrames.set(true)
 
             val currentTs = if (bufferInfo.presentationTimeUs > 0) {
                 if (firstSamplePtsUs == -1L) {
@@ -548,6 +553,9 @@ class RtmpStreamEngine(private val context: Context) {
         if (!isConnectingOrStreaming.get()) return
 
         reconnectAttempts = 0
+        hasReceivedRealVideoFrames.set(false)
+        hasReceivedRealAudioFrames.set(false)
+
         _stats.value = _stats.value.copy(
             isStreaming = true,
             isConnecting = false,
@@ -560,8 +568,17 @@ class RtmpStreamEngine(private val context: Context) {
         val keyframeIntervalFrames = targetFps * currentConfig.keyframeIntervalSec
         val (fallbackSps, fallbackPps) = getSpsPpsForResolution(currentConfig.resolution)
 
+        // Poll briefly for MediaProjection if service is initializing
+        var projection = StreamForegroundService.currentMediaProjection
+        if (projection == null) {
+            for (i in 0 until 10) {
+                delay(50)
+                projection = StreamForegroundService.currentMediaProjection
+                if (projection != null) break
+            }
+        }
+
         // Attach real hardware screen encoder if MediaProjection is available
-        val projection = StreamForegroundService.currentMediaProjection
         val encoder = ScreenCaptureEncoder.getInstance(context)
 
         if (projection != null) {
@@ -578,8 +595,23 @@ class RtmpStreamEngine(private val context: Context) {
                     throw java.io.IOException("RTMP stream socket disconnected.")
                 }
 
-                // If MediaProjection is absent (e.g. testing or camera mode), feed synthetic packets to keep connection alive
-                if (projection == null) {
+                // If projection became available after connect, attach it
+                if (projection == null && !encoder.isCapturing()) {
+                    val lateProj = StreamForegroundService.currentMediaProjection
+                    if (lateProj != null) {
+                        projection = lateProj
+                        Log.i(TAG, "Attaching late-initialized ScreenCaptureEncoder to RTMP.")
+                        encoder.registerVideoListener(videoFrameListener)
+                        encoder.registerAudioListener(audioFrameListener)
+                        encoder.startCapture(lateProj, currentConfig.resolution, targetFps, currentConfig.bitrateKbps, currentConfig.isLandscape)
+                    }
+                }
+
+                val isHardwareVideoActive = hasReceivedRealVideoFrames.get() || encoder.isCapturing()
+                val isHardwareAudioActive = hasReceivedRealAudioFrames.get()
+
+                // Feed synthetic packets ONLY if no real video is active (strictly prevents packet duplication and bitrate overshoot)
+                if (!isHardwareVideoActive) {
                     frameCounter++
                     val isKeyframe = (frameCounter % keyframeIntervalFrames == 1L)
                     val currentTs = (System.currentTimeMillis() - startTimeMs).toInt().coerceAtLeast(0)
@@ -589,7 +621,10 @@ class RtmpStreamEngine(private val context: Context) {
                         RtmpProtocol.writeChunk(out, RtmpProtocol.CSID_VIDEO, currentTs, RtmpProtocol.MSG_VIDEO, activeStreamId, videoPayload)
                     }
                     totalBytesSent.addAndGet(videoPayload.size.toLong())
+                }
 
+                if (!isHardwareAudioActive && !isHardwareVideoActive) {
+                    val currentTs = (System.currentTimeMillis() - startTimeMs).toInt().coerceAtLeast(0)
                     val audioPayload = createAacAudioPacket()
                     synchronized(out) {
                         RtmpProtocol.writeChunk(out, RtmpProtocol.CSID_AUDIO, currentTs, RtmpProtocol.MSG_AUDIO, activeStreamId, audioPayload)
@@ -855,10 +890,10 @@ class RtmpStreamEngine(private val context: Context) {
 
                 val measuredBitrate = if (deltaBytes > 0) {
                     ((deltaBytes * 8) / 1000).toInt()
+                } else if (hasReceivedRealVideoFrames.get()) {
+                    currentConfig.bitrateKbps
                 } else {
-                    val target = currentConfig.bitrateKbps
-                    val jitter = Random.nextInt(-60, 80)
-                    (target + jitter).coerceIn(400, 15000)
+                    0
                 }
 
                 val isOnline = isNetworkAvailable()

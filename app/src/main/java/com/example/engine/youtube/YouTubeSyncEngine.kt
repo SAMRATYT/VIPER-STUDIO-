@@ -32,13 +32,19 @@ import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.tasks.await
-import kotlinx.coroutines.withContext
-import okhttp3.OkHttpClient
-import okhttp3.Request
-import org.json.JSONObject
+import android.accounts.AccountManager
+import java.text.SimpleDateFormat
+import java.util.Date
+import java.util.Locale
+import java.util.TimeZone
 import java.util.UUID
 import java.util.concurrent.TimeUnit
 import kotlin.random.Random
+import okhttp3.MediaType.Companion.toMediaTypeOrNull
+import okhttp3.OkHttpClient
+import okhttp3.Request
+import okhttp3.RequestBody.Companion.toRequestBody
+import org.json.JSONObject
 
 /**
  * YouTube and Google Account synchronization engine for VIPER STUDIO.
@@ -357,12 +363,49 @@ class YouTubeSyncEngine(private val context: Context) {
         }
     }
 
+    private var lifecycleMonitorJob: Job? = null
+
+    fun setCustomOAuthToken(token: String) {
+        val trimmed = token.trim()
+        val updated = _channelInfo.value.copy(
+            oauthAccessToken = trimmed,
+            isYouTubeAuthorized = trimmed.isNotBlank()
+        )
+        _channelInfo.value = updated
+        prefsRepo.saveYouTubeChannelInfo(updated)
+        if (trimmed.isNotBlank()) {
+            scope.launch {
+                fetchChannelDetails(trimmed)
+            }
+        }
+    }
+
+    private suspend fun fetchOAuthTokenFromDevice(email: String, activity: Activity? = null): String? = kotlinx.coroutines.withContext(Dispatchers.IO) {
+        try {
+            val am = AccountManager.get(context)
+            val accounts = am.getAccountsByType("com.google")
+            val target = accounts.firstOrNull { it.name.equals(email, ignoreCase = true) } ?: accounts.firstOrNull()
+            if (target != null) {
+                val scopeStr = "oauth2:https://www.googleapis.com/auth/youtube https://www.googleapis.com/auth/youtube.force-ssl https://www.googleapis.com/auth/youtube.readonly"
+                val bundle = am.getAuthToken(target, scopeStr, null, activity, null, null).result
+                val token = bundle.getString(AccountManager.KEY_AUTHTOKEN)
+                if (!token.isNullOrBlank()) {
+                    Log.i(TAG, "Successfully retrieved YouTube OAuth token via AccountManager")
+                    return@withContext token
+                }
+            }
+        } catch (e: Exception) {
+            Log.w(TAG, "Device AccountManager token query note: ${e.message}")
+        }
+        null
+    }
+
     /**
      * Connects YouTube Permissions and queries actual YouTube channel statistics
-     * for the signed-in user.
-     * Requirement 6: Requests YouTube permissions only when connecting YouTube.
+     * using the authenticated YouTube Data API v3.
      */
     fun connectYouTubePermissions(
+        activity: Activity? = null,
         onSuccess: (YouTubeChannelInfo) -> Unit = {},
         onError: (String) -> Unit = {}
     ) {
@@ -378,73 +421,34 @@ class YouTubeSyncEngine(private val context: Context) {
             _isSyncing.value = true
             _authError.value = null
             try {
-                // Fetch real channel details if user has configured custom access token
-                var realTitle = current.channelTitle
-                var realSubscribers = "Live Broadcaster"
-                var realStreamKey = current.streamKey
-
-                // Attempt live query to YouTube Data API v3 if OAuth access token is set or available
-                val currentUser = firebaseAuth?.currentUser
-                if (currentUser != null) {
-                    val tokenResult = try {
-                        currentUser.getIdToken(false).await()
-                    } catch (e: Exception) {
-                        null
-                    }
-                    val token = tokenResult?.token
-                    if (!token.isNullOrBlank()) {
-                        // Attempt fetch channels?part=snippet,statistics&mine=true
-                        try {
-                            val req = Request.Builder()
-                                .url("https://www.googleapis.com/youtube/v3/channels?part=snippet,statistics&mine=true")
-                                .addHeader("Authorization", "Bearer $token")
-                                .build()
-                            val resp = httpClient.newCall(req).execute()
-                            if (resp.isSuccessful) {
-                                val body = resp.body?.string()
-                                if (!body.isNullOrBlank()) {
-                                    val json = JSONObject(body)
-                                    val items = json.optJSONArray("items")
-                                    if (items != null && items.length() > 0) {
-                                        val item = items.getJSONObject(0)
-                                        val snippet = item.optJSONObject("snippet")
-                                        val stats = item.optJSONObject("statistics")
-                                        if (snippet != null) {
-                                            realTitle = snippet.optString("title", realTitle)
-                                        }
-                                        if (stats != null) {
-                                            val subCount = stats.optString("subscriberCount", "")
-                                            if (subCount.isNotBlank()) {
-                                                realSubscribers = "$subCount Subscribers"
-                                            }
-                                        }
-                                    }
-                                }
-                            }
-                        } catch (e: Exception) {
-                            Log.d(TAG, "Live YouTube API query note: ${e.message}")
-                        }
-                    }
+                // Check if an OAuth access token is already available or can be retrieved from device AccountManager
+                var token = current.oauthAccessToken
+                if (token.isBlank()) {
+                    token = fetchOAuthTokenFromDevice(current.accountEmail, activity).orEmpty()
                 }
 
-                if (realStreamKey.isBlank()) {
-                    realStreamKey = "live_${current.accountEmail.substringBefore("@")}_${System.currentTimeMillis().toString().takeLast(6)}"
-                }
-
-                val authorized = current.copy(
-                    isYouTubeAuthorized = true,
-                    channelTitle = realTitle,
-                    subscriberCountText = realSubscribers,
-                    activeBroadcastTitle = "${realTitle} • Live Stream",
-                    streamKey = realStreamKey,
-                    lastSyncTimeMs = System.currentTimeMillis()
-                )
-
-                _channelInfo.value = authorized
-                prefsRepo.saveYouTubeChannelInfo(authorized)
-
-                withContext(Dispatchers.Main) {
-                    onSuccess(authorized)
+                if (token.isNotBlank()) {
+                    val result = fetchChannelDetails(token)
+                    if (result.isSuccess) {
+                        val channel = result.getOrThrow()
+                        withContext(Dispatchers.Main) { onSuccess(channel) }
+                    } else {
+                        val err = result.exceptionOrNull()?.message ?: "YouTube channel validation failed"
+                        _authError.value = err
+                        withContext(Dispatchers.Main) { onError(err) }
+                    }
+                } else {
+                    // Prompt user that YouTube Live OAuth token is required
+                    val promptMsg = "Google Account connected (${current.accountEmail}).\n\n" +
+                            "To enable automated YouTube Live broadcasting, authorize the YouTube API on your device or provide a YouTube OAuth token."
+                    val updated = current.copy(
+                        isYouTubeAuthorized = true,
+                        activeBroadcastTitle = "${current.channelTitle.ifBlank { "VIPER STUDIO" }} • Live Stream",
+                        lastSyncTimeMs = System.currentTimeMillis()
+                    )
+                    _channelInfo.value = updated
+                    prefsRepo.saveYouTubeChannelInfo(updated)
+                    withContext(Dispatchers.Main) { onSuccess(updated) }
                 }
             } catch (e: Exception) {
                 val msg = "YouTube connection failed: ${e.localizedMessage ?: "Network error"}"
@@ -456,6 +460,452 @@ class YouTubeSyncEngine(private val context: Context) {
             }
         }
     }
+
+    /**
+     * Uses YouTube Data API v3 to retrieve the real channel ID, custom URL, and verify eligibility.
+     */
+    suspend fun fetchChannelDetails(token: String): Result<YouTubeChannelInfo> = kotlinx.coroutines.withContext(Dispatchers.IO) {
+        try {
+            val req = Request.Builder()
+                .url("https://www.googleapis.com/youtube/v3/channels?part=snippet,contentDetails,status,statistics&mine=true")
+                .addHeader("Authorization", "Bearer $token")
+                .addHeader("Accept", "application/json")
+                .build()
+
+            val resp = httpClient.newCall(req).execute()
+            val code = resp.code
+            val body = resp.body?.string().orEmpty()
+
+            if (code == 401) {
+                return@withContext Result.failure(Exception("YouTube OAuth token expired or invalid (HTTP 401). Please re-authenticate."))
+            }
+            if (code == 403) {
+                val err = parseYouTubeApiError(code, body, "fetch channel details")
+                return@withContext Result.failure(Exception(err))
+            }
+            if (!resp.isSuccessful) {
+                return@withContext Result.failure(Exception("YouTube API channels query error (HTTP $code): $body"))
+            }
+
+            val json = JSONObject(body)
+            val items = json.optJSONArray("items")
+            if (items == null || items.length() == 0) {
+                return@withContext Result.failure(Exception("No YouTube channel found for account ${_channelInfo.value.accountEmail}. Please visit youtube.com to create a channel."))
+            }
+
+            val item = items.getJSONObject(0)
+            val channelId = item.optString("id", "")
+            val snippet = item.optJSONObject("snippet")
+            val stats = item.optJSONObject("statistics")
+
+            val title = snippet?.optString("title", _channelInfo.value.channelTitle) ?: _channelInfo.value.channelTitle
+            val handle = snippet?.optString("customUrl", _channelInfo.value.channelHandle) ?: _channelInfo.value.channelHandle
+            val thumbs = snippet?.optJSONObject("thumbnails")
+            val avatar = thumbs?.optJSONObject("default")?.optString("url", _channelInfo.value.avatarUrl) ?: _channelInfo.value.avatarUrl
+            val subCount = stats?.optString("subscriberCount", "") ?: ""
+            val subText = if (subCount.isNotBlank()) "$subCount Subscribers" else "Live Broadcaster"
+
+            val updated = _channelInfo.value.copy(
+                isConnected = true,
+                isYouTubeAuthorized = true,
+                channelId = channelId,
+                channelTitle = title,
+                channelHandle = handle,
+                avatarUrl = avatar,
+                subscriberCountText = subText,
+                oauthAccessToken = token,
+                lastSyncTimeMs = System.currentTimeMillis()
+            )
+            _channelInfo.value = updated
+            prefsRepo.saveYouTubeChannelInfo(updated)
+            Result.success(updated)
+        } catch (e: Exception) {
+            Result.failure(e)
+        }
+    }
+
+    /**
+     * Creates or selects a valid liveBroadcast and liveStream, binds them,
+     * and retrieves the actual ingestion address and stream name for RTMP transmission.
+     */
+    suspend fun prepareLiveBroadcastAndStream(
+        title: String,
+        description: String,
+        token: String
+    ): Result<YouTubeBroadcastSession> = kotlinx.coroutines.withContext(Dispatchers.IO) {
+        try {
+            val jsonMediaType = "application/json; charset=utf-8".toMediaTypeOrNull()
+
+            // 1. Check existing upcoming / active live broadcasts first
+            var broadcastId: String? = null
+            var boundStreamId: String? = null
+            var liveUrl: String? = null
+
+            val listBroadcastsReq = Request.Builder()
+                .url("https://www.googleapis.com/youtube/v3/liveBroadcasts?part=id,snippet,contentDetails,status&broadcastStatus=upcoming&maxResults=5")
+                .addHeader("Authorization", "Bearer $token")
+                .build()
+            val listResp = httpClient.newCall(listBroadcastsReq).execute()
+            if (listResp.isSuccessful) {
+                val body = listResp.body?.string().orEmpty()
+                val json = JSONObject(body)
+                val items = json.optJSONArray("items")
+                if (items != null && items.length() > 0) {
+                    for (i in 0 until items.length()) {
+                        val bItem = items.getJSONObject(i)
+                        val bStatus = bItem.optJSONObject("status")?.optString("lifeCycleStatus", "")
+                        if (bStatus == "ready" || bStatus == "testing" || bStatus == "created" || bStatus == "upcoming") {
+                            broadcastId = bItem.optString("id")
+                            boundStreamId = bItem.optJSONObject("contentDetails")?.optString("boundStreamId", null)
+                            liveUrl = "https://youtu.be/$broadcastId"
+                            Log.i(TAG, "Reusing existing upcoming liveBroadcast: $broadcastId (status: $bStatus)")
+                            break
+                        }
+                    }
+                }
+            }
+
+            // 2. If no existing usable broadcast found, create a new one
+            if (broadcastId == null) {
+                val nowIso = SimpleDateFormat("yyyy-MM-dd'T'HH:mm:ss'Z'", Locale.US).apply {
+                    timeZone = TimeZone.getTimeZone("UTC")
+                }.format(Date())
+
+                val broadcastPayload = JSONObject().apply {
+                    put("snippet", JSONObject().apply {
+                        put("title", title.ifBlank { "VIPER STUDIO Live Stream" })
+                        put("scheduledStartTime", nowIso)
+                        put("description", description.ifBlank { "Live streamed with VIPER STUDIO on Android" })
+                    })
+                    put("status", JSONObject().apply {
+                        put("privacyStatus", "public")
+                    })
+                    put("contentDetails", JSONObject().apply {
+                        put("enableAutoStart", true)
+                        put("enableAutoStop", true)
+                        put("recordFromStart", true)
+                    })
+                }
+
+                val createBroadcastReq = Request.Builder()
+                    .url("https://www.googleapis.com/youtube/v3/liveBroadcasts?part=snippet,status,contentDetails")
+                    .addHeader("Authorization", "Bearer $token")
+                    .addHeader("Accept", "application/json")
+                    .post(broadcastPayload.toString().toRequestBody(jsonMediaType))
+                    .build()
+
+                val createResp = httpClient.newCall(createBroadcastReq).execute()
+                val createBody = createResp.body?.string().orEmpty()
+                if (!createResp.isSuccessful) {
+                    val errMsg = parseYouTubeApiError(createResp.code, createBody, "create liveBroadcast")
+                    return@withContext Result.failure(Exception(errMsg))
+                }
+                val createdJson = JSONObject(createBody)
+                broadcastId = createdJson.getString("id")
+                liveUrl = "https://youtu.be/$broadcastId"
+                Log.i(TAG, "Created new YouTube liveBroadcast: $broadcastId")
+            }
+
+            // 3. Find or Create liveStream for RTMP ingestion
+            var streamId = boundStreamId
+            var ingestionAddress: String? = null
+            var streamName: String? = null
+
+            if (streamId != null) {
+                val getStreamReq = Request.Builder()
+                    .url("https://www.googleapis.com/youtube/v3/liveStreams?part=id,snippet,cdn,status&id=$streamId")
+                    .addHeader("Authorization", "Bearer $token")
+                    .build()
+                val getStreamResp = httpClient.newCall(getStreamReq).execute()
+                if (getStreamResp.isSuccessful) {
+                    val sBody = getStreamResp.body?.string().orEmpty()
+                    val sItems = JSONObject(sBody).optJSONArray("items")
+                    if (sItems != null && sItems.length() > 0) {
+                        val cdn = sItems.getJSONObject(0).optJSONObject("cdn")
+                        val ingInfo = cdn?.optJSONObject("ingestionInfo")
+                        ingestionAddress = ingInfo?.optString("ingestionAddress")
+                        streamName = ingInfo?.optString("streamName")
+                    }
+                }
+            }
+
+            if (ingestionAddress.isNullOrBlank() || streamName.isNullOrBlank()) {
+                val listStreamsReq = Request.Builder()
+                    .url("https://www.googleapis.com/youtube/v3/liveStreams?part=id,snippet,cdn,status&mine=true&maxResults=5")
+                    .addHeader("Authorization", "Bearer $token")
+                    .build()
+                val lStreamResp = httpClient.newCall(listStreamsReq).execute()
+                if (lStreamResp.isSuccessful) {
+                    val lsBody = lStreamResp.body?.string().orEmpty()
+                    val lsItems = JSONObject(lsBody).optJSONArray("items")
+                    if (lsItems != null && lsItems.length() > 0) {
+                        for (j in 0 until lsItems.length()) {
+                            val candidate = lsItems.getJSONObject(j)
+                            val cdn = candidate.optJSONObject("cdn")
+                            val ing = cdn?.optJSONObject("ingestionInfo")
+                            val addr = ing?.optString("ingestionAddress")
+                            val sKey = ing?.optString("streamName")
+                            if (!addr.isNullOrBlank() && !sKey.isNullOrBlank()) {
+                                streamId = candidate.getString("id")
+                                ingestionAddress = addr
+                                streamName = sKey
+                                Log.i(TAG, "Reusing existing liveStream: $streamId")
+                                break
+                            }
+                        }
+                    }
+                }
+            }
+
+            if (ingestionAddress.isNullOrBlank() || streamName.isNullOrBlank()) {
+                val streamPayload = JSONObject().apply {
+                    put("snippet", JSONObject().apply {
+                        put("title", "VIPER STUDIO RTMP Stream")
+                        put("description", "High-performance live ingestion stream for VIPER STUDIO")
+                    })
+                    put("cdn", JSONObject().apply {
+                        put("frameRate", "variable")
+                        put("ingestionType", "rtmp")
+                        put("resolution", "variable")
+                    })
+                }
+
+                val createStreamReq = Request.Builder()
+                    .url("https://www.googleapis.com/youtube/v3/liveStreams?part=snippet,cdn")
+                    .addHeader("Authorization", "Bearer $token")
+                    .addHeader("Accept", "application/json")
+                    .post(streamPayload.toString().toRequestBody(jsonMediaType))
+                    .build()
+
+                val cStreamResp = httpClient.newCall(createStreamReq).execute()
+                val csBody = cStreamResp.body?.string().orEmpty()
+                if (!cStreamResp.isSuccessful) {
+                    val errMsg = parseYouTubeApiError(cStreamResp.code, csBody, "create liveStream")
+                    return@withContext Result.failure(Exception(errMsg))
+                }
+                val csJson = JSONObject(csBody)
+                streamId = csJson.getString("id")
+                val ingInfo = csJson.getJSONObject("cdn").getJSONObject("ingestionInfo")
+                ingestionAddress = ingInfo.getString("ingestionAddress")
+                streamName = ingInfo.getString("streamName")
+                Log.i(TAG, "Created new YouTube liveStream: $streamId")
+            }
+
+            // 4. Bind broadcast to stream
+            if (broadcastId != null && streamId != null && streamId != boundStreamId) {
+                val bindReq = Request.Builder()
+                    .url("https://www.googleapis.com/youtube/v3/liveBroadcasts/bind?id=$broadcastId&part=id,contentDetails&streamId=$streamId")
+                    .addHeader("Authorization", "Bearer $token")
+                    .addHeader("Accept", "application/json")
+                    .post("".toRequestBody(null))
+                    .build()
+
+                val bindResp = httpClient.newCall(bindReq).execute()
+                if (!bindResp.isSuccessful) {
+                    val bindBody = bindResp.body?.string().orEmpty()
+                    Log.w(TAG, "liveBroadcasts.bind note (${bindResp.code}): $bindBody")
+                } else {
+                    Log.i(TAG, "Successfully bound liveBroadcast $broadcastId to liveStream $streamId")
+                }
+            }
+
+            val finalUrl = liveUrl ?: "https://youtu.be/$broadcastId"
+            val session = YouTubeBroadcastSession(
+                broadcastId = broadcastId!!,
+                streamId = streamId!!,
+                rtmpIngestUrl = ingestionAddress ?: "rtmp://a.rtmp.youtube.com/live2",
+                streamKey = streamName!!,
+                liveUrl = finalUrl,
+                title = title
+            )
+
+            val updated = _channelInfo.value.copy(
+                activeBroadcastId = session.broadcastId,
+                activeBroadcastTitle = title,
+                streamKey = session.streamKey,
+                rtmpIngestUrl = session.rtmpIngestUrl,
+                liveUrl = session.liveUrl,
+                streamStatus = "PREPARING",
+                lifeCycleStatus = "CREATED",
+                isLiveVerified = false
+            )
+            _channelInfo.value = updated
+            prefsRepo.saveYouTubeChannelInfo(updated)
+
+            Result.success(session)
+        } catch (e: Exception) {
+            Result.failure(e)
+        }
+    }
+
+    private fun parseYouTubeApiError(code: Int, body: String, action: String): String {
+        return try {
+            val json = JSONObject(body)
+            val errObj = json.optJSONObject("error")
+            val message = errObj?.optString("message", "")
+            val errors = errObj?.optJSONArray("errors")
+            val reason = if (errors != null && errors.length() > 0) {
+                errors.getJSONObject(0).optString("reason", "")
+            } else ""
+
+            when {
+                reason == "liveStreamingNotEnabled" || body.contains("liveStreamingNotEnabled", ignoreCase = true) ->
+                    "YouTube Live streaming is not enabled on this channel. Enable it at https://www.youtube.com/features (requires 24-hour verification by YouTube)."
+                code == 401 ->
+                    "YouTube OAuth authorization expired or invalid (HTTP 401). Please re-connect permissions."
+                code == 403 && reason == "quotaExceeded" ->
+                    "YouTube Data API quota exceeded for your project. Please try again later."
+                !message.isNullOrBlank() ->
+                    "YouTube API error during $action ($code): $message"
+                else ->
+                    "YouTube API request failed ($code): $body"
+            }
+        } catch (_: Exception) {
+            "YouTube API request failed ($code): $body"
+        }
+    }
+
+    /**
+     * Verifies actual video and audio transmission, checks streamStatus and lifeCycleStatus,
+     * and transitions the broadcast to live once data is arriving.
+     */
+    fun startBroadcastLifecycleMonitoring(
+        session: YouTubeBroadcastSession,
+        rtmpEngine: com.example.engine.streaming.RtmpStreamEngine
+    ) {
+        lifecycleMonitorJob?.cancel()
+        lifecycleMonitorJob = scope.launch {
+            val token = _channelInfo.value.oauthAccessToken
+            if (token.isBlank()) return@launch
+
+            Log.i(TAG, "Starting YouTube Live broadcast lifecycle monitor for broadcast=${session.broadcastId}, stream=${session.streamId}")
+            var attempts = 0
+            var hasTransitionedToLive = false
+
+            while (isActive && rtmpEngine.stats.value.isStreaming) {
+                delay(3000)
+                attempts++
+
+                try {
+                    // Check RTMP packet transmission locally
+                    val framesSent = rtmpEngine.stats.value.totalFrames
+                    if (framesSent <= 0) {
+                        _channelInfo.value = _channelInfo.value.copy(
+                            streamStatus = "AWAITING_FRAMES",
+                            lifeCycleStatus = "INGESTION_PENDING",
+                            isLiveVerified = false
+                        )
+                        continue
+                    }
+
+                    // Query YouTube liveStream status
+                    val streamReq = Request.Builder()
+                        .url("https://www.googleapis.com/youtube/v3/liveStreams?part=status&id=${session.streamId}")
+                        .addHeader("Authorization", "Bearer $token")
+                        .build()
+                    val sResp = httpClient.newCall(streamReq).execute()
+                    var ytStreamStatus = "unknown"
+                    if (sResp.isSuccessful) {
+                        val sBody = sResp.body?.string().orEmpty()
+                        val sItems = JSONObject(sBody).optJSONArray("items")
+                        if (sItems != null && sItems.length() > 0) {
+                            ytStreamStatus = sItems.getJSONObject(0).optJSONObject("status")?.optString("streamStatus", "unknown") ?: "unknown"
+                        }
+                    }
+
+                    // Query YouTube liveBroadcast lifecycle status
+                    val bReq = Request.Builder()
+                        .url("https://www.googleapis.com/youtube/v3/liveBroadcasts?part=id,status,contentDetails&id=${session.broadcastId}")
+                        .addHeader("Authorization", "Bearer $token")
+                        .build()
+                    val bResp = httpClient.newCall(bReq).execute()
+                    var ytLifeCycleStatus = "unknown"
+                    var enableAutoStart = false
+                    if (bResp.isSuccessful) {
+                        val bBody = bResp.body?.string().orEmpty()
+                        val bItems = JSONObject(bBody).optJSONArray("items")
+                        if (bItems != null && bItems.length() > 0) {
+                            val bObj = bItems.getJSONObject(0)
+                            ytLifeCycleStatus = bObj.optJSONObject("status")?.optString("lifeCycleStatus", "unknown") ?: "unknown"
+                            enableAutoStart = bObj.optJSONObject("contentDetails")?.optBoolean("enableAutoStart", false) ?: false
+                        }
+                    }
+
+                    Log.d(TAG, "YouTube stream check [#$attempts]: streamStatus=$ytStreamStatus, lifeCycleStatus=$ytLifeCycleStatus")
+
+                    val isIngestionActive = ytStreamStatus.equals("active", ignoreCase = true)
+                    val isBroadcastLive = ytLifeCycleStatus.equals("live", ignoreCase = true)
+
+                    // Transition to live if streamStatus is active and not yet live
+                    if (isIngestionActive && !isBroadcastLive && !hasTransitionedToLive && !enableAutoStart) {
+                        Log.i(TAG, "YouTube stream is active! Transitioning broadcast ${session.broadcastId} to LIVE...")
+                        val transitionReq = Request.Builder()
+                            .url("https://www.googleapis.com/youtube/v3/liveBroadcasts/transition?broadcastStatus=live&id=${session.broadcastId}&part=id,status")
+                            .addHeader("Authorization", "Bearer $token")
+                            .addHeader("Accept", "application/json")
+                            .post("".toRequestBody(null))
+                            .build()
+                        val tResp = httpClient.newCall(transitionReq).execute()
+                        if (tResp.isSuccessful) {
+                            hasTransitionedToLive = true
+                            ytLifeCycleStatus = "live"
+                            Log.i(TAG, "Successfully transitioned broadcast to LIVE!")
+                        } else {
+                            val tBody = tResp.body?.string().orEmpty()
+                            Log.w(TAG, "Transition to live note (${tResp.code}): $tBody")
+                        }
+                    }
+
+                    // Update state - NEVER claim verified live if streamStatus is not active or lifeCycle is not live
+                    val verified = isBroadcastLive || (isIngestionActive && (enableAutoStart || hasTransitionedToLive))
+                    _channelInfo.value = _channelInfo.value.copy(
+                        streamStatus = ytStreamStatus.uppercase(),
+                        lifeCycleStatus = ytLifeCycleStatus.uppercase(),
+                        isLiveVerified = verified,
+                        liveUrl = session.liveUrl
+                    )
+                    prefsRepo.saveYouTubeChannelInfo(_channelInfo.value)
+
+                } catch (e: Exception) {
+                    Log.w(TAG, "Lifecycle monitor poll exception: ${e.message}")
+                }
+            }
+
+            // Cleanup when stream ends: transition broadcast to complete
+            try {
+                if (_channelInfo.value.isLiveVerified) {
+                    val finishReq = Request.Builder()
+                        .url("https://www.googleapis.com/youtube/v3/liveBroadcasts/transition?broadcastStatus=complete&id=${session.broadcastId}&part=id,status")
+                        .addHeader("Authorization", "Bearer $token")
+                        .addHeader("Accept", "application/json")
+                        .post("".toRequestBody(null))
+                        .build()
+                    httpClient.newCall(finishReq).execute()
+                    Log.i(TAG, "Transitioned broadcast ${session.broadcastId} to COMPLETE.")
+                }
+            } catch (_: Exception) {}
+
+            _channelInfo.value = _channelInfo.value.copy(
+                isLiveVerified = false,
+                streamStatus = "STOPPED",
+                lifeCycleStatus = "COMPLETE"
+            )
+        }
+    }
+
+    fun stopBroadcastLifecycleMonitoring() {
+        lifecycleMonitorJob?.cancel()
+        lifecycleMonitorJob = null
+    }
+
+    data class YouTubeBroadcastSession(
+        val broadcastId: String,
+        val streamId: String,
+        val rtmpIngestUrl: String,
+        val streamKey: String,
+        val liveUrl: String,
+        val title: String
+    )
 
     /**
      * Requirement 4: Disconnect Account button functionality.

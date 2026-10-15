@@ -150,7 +150,12 @@ data class YouTubeChannelInfo(
     val streamKey: String = "",
     val rtmpIngestUrl: String = "rtmp://a.rtmp.youtube.com/live2",
     val lastSyncTimeMs: Long = 0L,
-    val isYouTubeAuthorized: Boolean = false
+    val isYouTubeAuthorized: Boolean = false,
+    val liveUrl: String = "",
+    val streamStatus: String = "",
+    val lifeCycleStatus: String = "",
+    val isLiveVerified: Boolean = false,
+    val oauthAccessToken: String = ""
 )
 
 data class LiveChatSettings(
