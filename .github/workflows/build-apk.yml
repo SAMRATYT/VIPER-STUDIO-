@@ -67,32 +67,54 @@ jobs:
       - name: Restore persistent signing keystore
         run: |
           KEYSTORE_PATH="./debug.keystore"
-          if [ -f "${KEYSTORE_PATH}" ]; then
+          if [ -n "${{ secrets.VIPER_KEYSTORE_BASE64 }}" ]; then
+            echo "Restoring persistent keystore from GitHub Secret VIPER_KEYSTORE_BASE64..."
+            echo "${{ secrets.VIPER_KEYSTORE_BASE64 }}" | tr -d '\r\n\t ' | base64 -d > "${KEYSTORE_PATH}"
+          elif [ -n "${{ secrets.DEBUG_KEYSTORE_BASE64 }}" ]; then
+            echo "Restoring persistent keystore from GitHub Secret DEBUG_KEYSTORE_BASE64..."
+            echo "${{ secrets.DEBUG_KEYSTORE_BASE64 }}" | tr -d '\r\n\t ' | base64 -d > "${KEYSTORE_PATH}"
+          elif [ -f "${KEYSTORE_PATH}" ]; then
             echo "Persistent keystore already exists at ${KEYSTORE_PATH}."
           elif [ -f "./debug.keystore.base64" ]; then
             echo "Restoring persistent keystore from repository debug.keystore.base64..."
-            base64 -d ./debug.keystore.base64 > "${KEYSTORE_PATH}"
-          elif [ -n "${{ secrets.VIPER_KEYSTORE_BASE64 }}" ]; then
-            echo "Restoring persistent keystore from GitHub Secret VIPER_KEYSTORE_BASE64..."
-            echo "${{ secrets.VIPER_KEYSTORE_BASE64 }}" | base64 -d > "${KEYSTORE_PATH}"
-          elif [ -n "${{ secrets.DEBUG_KEYSTORE_BASE64 }}" ]; then
-            echo "Restoring persistent keystore from GitHub Secret DEBUG_KEYSTORE_BASE64..."
-            echo "${{ secrets.DEBUG_KEYSTORE_BASE64 }}" | base64 -d > "${KEYSTORE_PATH}"
+            cat ./debug.keystore.base64 | tr -d '\r\n\t ' | base64 -d > "${KEYSTORE_PATH}"
           else
             echo "ERROR: Persistent debug.keystore or debug.keystore.base64 missing! Refusing to generate a random key that breaks Firebase Google Sign-In and APK updates."
             exit 1
           fi
 
-          if [ ! -f "${KEYSTORE_PATH}" ]; then
-            echo "ERROR: Keystore file ${KEYSTORE_PATH} was not found after restore."
+          if [ ! -f "${KEYSTORE_PATH}" ] || [ ! -s "${KEYSTORE_PATH}" ]; then
+            echo "ERROR: Keystore file ${KEYSTORE_PATH} is missing or empty (0 bytes) after restore."
+            exit 1
+          fi
+
+          STORE_PASS="${{ secrets.VIPER_STORE_PASSWORD || secrets.DEBUG_STORE_PASSWORD || secrets.STORE_PASSWORD || 'android' }}"
+          KEY_ALIAS="${{ secrets.VIPER_KEY_ALIAS || secrets.DEBUG_KEY_ALIAS || secrets.KEY_ALIAS || 'androiddebugkey' }}"
+
+          echo "=== Verifying Keystore Integrity ==="
+          if ! "${JAVA_HOME}/bin/keytool" -list -keystore "${KEYSTORE_PATH}" -storepass "${STORE_PASS}" > /dev/null 2>&1; then
+            echo "ERROR: Keystore password verification failed. If using a custom keystore, configure VIPER_STORE_PASSWORD in GitHub Secrets."
+            exit 1
+          fi
+
+          if ! "${JAVA_HOME}/bin/keytool" -list -keystore "${KEYSTORE_PATH}" -storepass "${STORE_PASS}" -alias "${KEY_ALIAS}" > /dev/null 2>&1; then
+            echo "ERROR: Key alias '${KEY_ALIAS}' not found in keystore. Available entries in keystore:"
+            "${JAVA_HOME}/bin/keytool" -list -keystore "${KEYSTORE_PATH}" -storepass "${STORE_PASS}" || true
+            echo "If your key alias is different, configure VIPER_KEY_ALIAS in GitHub Secrets."
             exit 1
           fi
 
           echo "=== Verified Keystore Certificate Fingerprints ==="
-          "${JAVA_HOME}/bin/keytool" -list -v -keystore "${KEYSTORE_PATH}" -storepass android -alias androiddebugkey | grep -E "SHA1:|SHA256:" || true
+          "${JAVA_HOME}/bin/keytool" -list -v -keystore "${KEYSTORE_PATH}" -storepass "${STORE_PASS}" -alias "${KEY_ALIAS}" | grep -E "SHA1:|SHA256:" || true
           echo "Persistent signing keystore verified successfully."
 
       - name: Build the debug APK
+        env:
+          KEYSTORE_PATH: ${{ github.workspace }}/debug.keystore
+          DEBUG_KEYSTORE_PATH: ${{ github.workspace }}/debug.keystore
+          STORE_PASSWORD: ${{ secrets.VIPER_STORE_PASSWORD || secrets.DEBUG_STORE_PASSWORD || secrets.STORE_PASSWORD || 'android' }}
+          KEY_PASSWORD: ${{ secrets.VIPER_KEY_PASSWORD || secrets.DEBUG_KEY_PASSWORD || secrets.KEY_PASSWORD || secrets.VIPER_STORE_PASSWORD || secrets.DEBUG_STORE_PASSWORD || secrets.STORE_PASSWORD || 'android' }}
+          KEY_ALIAS: ${{ secrets.VIPER_KEY_ALIAS || secrets.DEBUG_KEY_ALIAS || secrets.KEY_ALIAS || 'androiddebugkey' }}
         run: |
           gradle :app:assembleDebug --stacktrace --no-daemon
 
