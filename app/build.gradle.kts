@@ -48,7 +48,7 @@ android {
       keyAlias = System.getenv("VIPER_KEY_ALIAS")
         ?: System.getenv("KEY_ALIAS")
         ?: System.getenv("DEBUG_KEY_ALIAS")
-        ?: "upload"
+        ?: if (candidate.name == "debug.keystore") "androiddebugkey" else "upload"
       keyPassword = System.getenv("VIPER_KEY_PASSWORD")
         ?: System.getenv("KEY_PASSWORD")
         ?: System.getenv("DEBUG_KEY_PASSWORD")
@@ -87,6 +87,7 @@ android {
 
   buildTypes {
     release {
+      isDebuggable = false
       isCrunchPngs = false
       isMinifyEnabled = false
       proguardFiles(getDefaultProguardFile("proguard-android-optimize.txt"), "proguard-rules.pro")
