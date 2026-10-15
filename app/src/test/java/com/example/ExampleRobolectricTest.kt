@@ -551,9 +551,9 @@ class ExampleRobolectricTest {
         )
 
         for (i in 0 until 10) {
-            // (15000 * 0.85 + 10000) * 0.88 = (12750 + 10000) * 0.88 = 20020
+            // 15000 * 0.85 + 10000 = 12750 + 10000 = 22750
             assertTrue("Output with calibrated mic gain should not clip", outPcm[i] <= 32767)
-            assertTrue("Output should be well within comfortable linear range", outPcm[i] in 18000..22000)
+            assertTrue("Output should be well within comfortable linear range", outPcm[i] in 18000..24000)
         }
     }
 

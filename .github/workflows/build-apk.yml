@@ -73,8 +73,11 @@ jobs:
             echo "Restoring persistent keystore from repository debug.keystore.base64..."
             base64 -d ./debug.keystore.base64 > "${KEYSTORE_PATH}"
           elif [ -n "${{ secrets.VIPER_KEYSTORE_BASE64 }}" ]; then
-            echo "Restoring persistent keystore from GitHub Secret DEBUG_KEYSTORE_BASE64..."
+            echo "Restoring persistent keystore from GitHub Secret VIPER_KEYSTORE_BASE64..."
             echo "${{ secrets.VIPER_KEYSTORE_BASE64 }}" | base64 -d > "${KEYSTORE_PATH}"
+          elif [ -n "${{ secrets.DEBUG_KEYSTORE_BASE64 }}" ]; then
+            echo "Restoring persistent keystore from GitHub Secret DEBUG_KEYSTORE_BASE64..."
+            echo "${{ secrets.DEBUG_KEYSTORE_BASE64 }}" | base64 -d > "${KEYSTORE_PATH}"
           else
             echo "ERROR: Persistent debug.keystore or debug.keystore.base64 missing! Refusing to generate a random key that breaks Firebase Google Sign-In and APK updates."
             exit 1
