@@ -47,6 +47,7 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.alpha
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.draw.rotate
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.platform.LocalContext
@@ -161,16 +162,22 @@ fun StudioScreen(
             // Render Scene Layers in Viewport with dynamic positions & sizes
             activeScene?.layers?.sortedBy { it.zIndex }?.forEach { layer ->
                 if (layer.isVisible) {
-                    val xOffset = (canvasWidth * (layer.xPct / 100f))
-                    val yOffset = (canvasHeight * (layer.yPct / 100f))
-                    val layerW = (canvasWidth * (layer.widthPct / 100f))
-                    val layerH = (canvasHeight * (layer.heightPct / 100f))
+                    val xPct = layer.getX(streamConfig.isLandscape)
+                    val yPct = layer.getY(streamConfig.isLandscape)
+                    val wPct = layer.getWidth(streamConfig.isLandscape)
+                    val hPct = layer.getHeight(streamConfig.isLandscape)
+
+                    val xOffset = (canvasWidth * (xPct / 100f))
+                    val yOffset = (canvasHeight * (yPct / 100f))
+                    val layerW = (canvasWidth * (wPct / 100f))
+                    val layerH = (canvasHeight * (hPct / 100f))
                     val layerAlpha = layer.opacity.coerceIn(0.05f, 1.0f)
 
                     Box(
                         modifier = Modifier
                             .offset { IntOffset(xOffset.roundToPx(), yOffset.roundToPx()) }
                             .size(width = layerW, height = layerH)
+                            .rotate(layer.rotationDeg)
                             .alpha(layerAlpha)
                     ) {
                         when (layer.type) {

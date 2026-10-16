@@ -241,17 +241,34 @@ class ViperStudioApplication : Application() {
                 obj.put("yPct", l.yPct.toDouble())
                 obj.put("widthPct", l.widthPct.toDouble())
                 obj.put("heightPct", l.heightPct.toDouble())
+                obj.put("xPctPortrait", l.xPctPortrait.toDouble())
+                obj.put("yPctPortrait", l.yPctPortrait.toDouble())
+                obj.put("widthPctPortrait", l.widthPctPortrait.toDouble())
+                obj.put("heightPctPortrait", l.heightPctPortrait.toDouble())
                 obj.put("rotationDeg", l.rotationDeg.toDouble())
                 obj.put("isVisible", l.isVisible)
                 obj.put("isLocked", l.isLocked)
                 obj.put("zIndex", l.zIndex)
+                obj.put("maintainAspectRatio", l.maintainAspectRatio)
                 obj.put("textContent", l.textContent)
                 obj.put("textColorHex", l.textColorHex)
+                obj.put("textFontFamily", l.textFontFamily)
+                obj.put("textFontSizeSp", l.textFontSizeSp.toDouble())
+                obj.put("isTextBold", l.isTextBold)
+                obj.put("hasTextOutline", l.hasTextOutline)
+                obj.put("textOutlineColorHex", l.textOutlineColorHex)
+                obj.put("textOutlineWidth", l.textOutlineWidth.toDouble())
+                obj.put("hasTextShadow", l.hasTextShadow)
+                obj.put("textShadowColorHex", l.textShadowColorHex)
+                obj.put("textShadowRadius", l.textShadowRadius.toDouble())
                 obj.put("bgColorHex", l.bgColorHex)
                 obj.put("pipShape", l.pipShape)
                 obj.put("isMarqueeScroll", l.isMarqueeScroll)
                 obj.put("opacity", l.opacity.toDouble())
                 obj.put("imageUrl", l.imageUrl)
+                obj.put("overlayPresetType", l.overlayPresetType)
+                obj.put("borderStrokeColorHex", l.borderStrokeColorHex)
+                obj.put("borderStrokeWidthDp", l.borderStrokeWidthDp.toDouble())
                 array.put(obj)
             }
             return array.toString()
@@ -263,26 +280,47 @@ class ViperStudioApplication : Application() {
                 val array = JSONArray(json)
                 for (i in 0 until array.length()) {
                     val obj = array.getJSONObject(i)
+                    val x = obj.getDouble("xPct").toFloat()
+                    val y = obj.getDouble("yPct").toFloat()
+                    val w = obj.getDouble("widthPct").toFloat()
+                    val h = obj.getDouble("heightPct").toFloat()
                     list.add(
                         SceneLayer(
                             id = obj.getString("id"),
                             type = LayerType.valueOf(obj.getString("type")),
                             label = obj.optString("label", "Layer"),
-                            xPct = obj.getDouble("xPct").toFloat(),
-                            yPct = obj.getDouble("yPct").toFloat(),
-                            widthPct = obj.getDouble("widthPct").toFloat(),
-                            heightPct = obj.getDouble("heightPct").toFloat(),
+                            xPct = x,
+                            yPct = y,
+                            widthPct = w,
+                            heightPct = h,
+                            xPctPortrait = obj.optDouble("xPctPortrait", x.toDouble()).toFloat(),
+                            yPctPortrait = obj.optDouble("yPctPortrait", y.toDouble()).toFloat(),
+                            widthPctPortrait = obj.optDouble("widthPctPortrait", w.toDouble()).toFloat(),
+                            heightPctPortrait = obj.optDouble("heightPctPortrait", h.toDouble()).toFloat(),
                             rotationDeg = obj.optDouble("rotationDeg", 0.0).toFloat(),
                             opacity = obj.optDouble("opacity", 1.0).toFloat(),
                             isVisible = obj.optBoolean("isVisible", true),
                             isLocked = obj.optBoolean("isLocked", false),
                             zIndex = obj.optInt("zIndex", i),
+                            maintainAspectRatio = obj.optBoolean("maintainAspectRatio", true),
                             textContent = obj.optString("textContent", ""),
                             textColorHex = obj.optString("textColorHex", "#00E676"),
+                            textFontFamily = obj.optString("textFontFamily", "DEFAULT"),
+                            textFontSizeSp = obj.optDouble("textFontSizeSp", 18.0).toFloat(),
+                            isTextBold = obj.optBoolean("isTextBold", true),
+                            hasTextOutline = obj.optBoolean("hasTextOutline", true),
+                            textOutlineColorHex = obj.optString("textOutlineColorHex", "#000000"),
+                            textOutlineWidth = obj.optDouble("textOutlineWidth", 2.0).toFloat(),
+                            hasTextShadow = obj.optBoolean("hasTextShadow", true),
+                            textShadowColorHex = obj.optString("textShadowColorHex", "#000000"),
+                            textShadowRadius = obj.optDouble("textShadowRadius", 4.0).toFloat(),
                             bgColorHex = obj.optString("bgColorHex", "#B3111722"),
                             pipShape = obj.optString("pipShape", "ROUNDED"),
                             isMarqueeScroll = obj.optBoolean("isMarqueeScroll", false),
-                            imageUrl = obj.optString("imageUrl", "")
+                            imageUrl = obj.optString("imageUrl", ""),
+                            overlayPresetType = obj.optString("overlayPresetType", ""),
+                            borderStrokeColorHex = obj.optString("borderStrokeColorHex", "#00E5FF"),
+                            borderStrokeWidthDp = obj.optDouble("borderStrokeWidthDp", 0.0).toFloat()
                         )
                     )
                 }

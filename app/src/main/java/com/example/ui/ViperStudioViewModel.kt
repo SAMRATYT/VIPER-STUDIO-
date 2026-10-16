@@ -38,7 +38,9 @@ import kotlinx.coroutines.flow.map
 import kotlinx.coroutines.flow.stateIn
 import kotlinx.coroutines.launch
 import java.util.UUID
-
+import android.net.Uri
+import com.example.engine.scene.SceneImageManager
+import com.example.engine.scene.StreamOverlayManager
 import com.example.data.model.ChatMessage
 import com.example.data.model.LiveChatSettings
 import com.example.data.model.YouTubeChannelInfo
@@ -185,14 +187,21 @@ class ViperStudioViewModel(application: Application) : AndroidViewModel(applicat
         _selectedLayerId.value = layerId
     }
 
-    fun updateLayerPosition(layerId: String, newXPct: Float, newYPct: Float) {
+    fun updateLayerPosition(layerId: String, newXPct: Float, newYPct: Float, isLandscape: Boolean = _streamConfig.value.isLandscape) {
         val current = _activeScene.value ?: return
         val updatedLayers = current.layers.map { layer ->
             if (layer.id == layerId && !layer.isLocked) {
-                layer.copy(
-                    xPct = newXPct.coerceIn(0f, 95f),
-                    yPct = newYPct.coerceIn(0f, 95f)
-                )
+                if (isLandscape) {
+                    layer.copy(
+                        xPct = newXPct.coerceIn(0f, 96f),
+                        yPct = newYPct.coerceIn(0f, 96f)
+                    )
+                } else {
+                    layer.copy(
+                        xPctPortrait = newXPct.coerceIn(0f, 96f),
+                        yPctPortrait = newYPct.coerceIn(0f, 96f)
+                    )
+                }
             } else layer
         }
         val updatedScene = current.copy(layers = updatedLayers)
@@ -200,15 +209,28 @@ class ViperStudioViewModel(application: Application) : AndroidViewModel(applicat
         saveSceneToDb(updatedScene)
     }
 
-    fun updateLayerSize(layerId: String, newWidthPct: Float, newHeightPct: Float) {
+    fun updateLayerSize(layerId: String, newWidthPct: Float, newHeightPct: Float, isLandscape: Boolean = _streamConfig.value.isLandscape) {
         val current = _activeScene.value ?: return
         val updatedLayers = current.layers.map { layer ->
             if (layer.id == layerId && !layer.isLocked) {
-                layer.copy(
-                    widthPct = newWidthPct.coerceIn(5f, 100f),
-                    heightPct = newHeightPct.coerceIn(5f, 100f)
-                )
+                val clampedW = newWidthPct.coerceIn(4f, 100f)
+                val clampedH = newHeightPct.coerceIn(3f, 100f)
+                if (isLandscape) {
+                    layer.copy(widthPct = clampedW, heightPct = clampedH)
+                } else {
+                    layer.copy(widthPctPortrait = clampedW, heightPctPortrait = clampedH)
+                }
             } else layer
+        }
+        val updatedScene = current.copy(layers = updatedLayers)
+        _activeScene.value = updatedScene
+        saveSceneToDb(updatedScene)
+    }
+
+    fun updateLayerMaintainAspectRatio(layerId: String, maintain: Boolean) {
+        val current = _activeScene.value ?: return
+        val updatedLayers = current.layers.map {
+            if (it.id == layerId) it.copy(maintainAspectRatio = maintain) else it
         }
         val updatedScene = current.copy(layers = updatedLayers)
         _activeScene.value = updatedScene
@@ -265,6 +287,64 @@ class ViperStudioViewModel(application: Application) : AndroidViewModel(applicat
         saveSceneToDb(updatedScene)
     }
 
+    fun updateLayerTextStyling(
+        layerId: String,
+        text: String,
+        colorHex: String,
+        fontFamily: String,
+        fontSizeSp: Float,
+        isBold: Boolean,
+        hasOutline: Boolean,
+        outlineColorHex: String,
+        outlineWidth: Float,
+        hasShadow: Boolean,
+        shadowColorHex: String,
+        shadowRadius: Float
+    ) {
+        val current = _activeScene.value ?: return
+        val updatedLayers = current.layers.map {
+            if (it.id == layerId) {
+                it.copy(
+                    textContent = text,
+                    textColorHex = colorHex,
+                    textFontFamily = fontFamily,
+                    textFontSizeSp = fontSizeSp.coerceIn(10f, 60f),
+                    isTextBold = isBold,
+                    hasTextOutline = hasOutline,
+                    textOutlineColorHex = outlineColorHex,
+                    textOutlineWidth = outlineWidth.coerceIn(0f, 8f),
+                    hasTextShadow = hasShadow,
+                    textShadowColorHex = shadowColorHex,
+                    textShadowRadius = shadowRadius.coerceIn(0f, 16f)
+                )
+            } else it
+        }
+        val updatedScene = current.copy(layers = updatedLayers)
+        _activeScene.value = updatedScene
+        saveSceneToDb(updatedScene)
+    }
+
+    fun updateLayerOverlayStyling(
+        layerId: String,
+        strokeColorHex: String,
+        strokeWidthDp: Float,
+        presetType: String = ""
+    ) {
+        val current = _activeScene.value ?: return
+        val updatedLayers = current.layers.map {
+            if (it.id == layerId) {
+                it.copy(
+                    borderStrokeColorHex = strokeColorHex,
+                    borderStrokeWidthDp = strokeWidthDp.coerceIn(0f, 10f),
+                    overlayPresetType = if (presetType.isNotBlank()) presetType else it.overlayPresetType
+                )
+            } else it
+        }
+        val updatedScene = current.copy(layers = updatedLayers)
+        _activeScene.value = updatedScene
+        saveSceneToDb(updatedScene)
+    }
+
     fun updateLayerImage(layerId: String, imageUrl: String) {
         val current = _activeScene.value ?: return
         val updatedLayers = current.layers.map {
@@ -272,6 +352,108 @@ class ViperStudioViewModel(application: Application) : AndroidViewModel(applicat
         }
         val updatedScene = current.copy(layers = updatedLayers)
         _activeScene.value = updatedScene
+        saveSceneToDb(updatedScene)
+    }
+
+    fun addCustomImageLayer(uri: Uri, label: String = "Imported Image") {
+        val current = _activeScene.value ?: return
+        val localFilePath = SceneImageManager.getInstance(getApplication()).importImageFromUri(uri, "img")
+        if (localFilePath.isNullOrBlank()) return
+
+        val newLayer = SceneLayer(
+            id = "layer_${UUID.randomUUID().toString().take(6)}",
+            type = LayerType.IMAGE_OVERLAY,
+            label = label,
+            xPct = 25f,
+            yPct = 25f,
+            widthPct = 35f,
+            heightPct = 25f,
+            xPctPortrait = 20f,
+            yPctPortrait = 30f,
+            widthPctPortrait = 60f,
+            heightPctPortrait = 20f,
+            zIndex = (current.layers.maxOfOrNull { it.zIndex } ?: 0) + 1,
+            imageUrl = localFilePath,
+            maintainAspectRatio = true,
+            opacity = 1.0f
+        )
+        val updatedScene = current.copy(layers = current.layers + newLayer)
+        _activeScene.value = updatedScene
+        _selectedLayerId.value = newLayer.id
+        saveSceneToDb(updatedScene)
+    }
+
+    fun addCustomOverlayFrame(presetType: String, label: String, strokeColorHex: String = "#00E5FF") {
+        val current = _activeScene.value ?: return
+        val (w, h, wPort, hPort) = when (presetType) {
+            "GAMING_BORDER" -> listOf(98f, 96f, 96f, 96f)
+            "WEBCAM_FRAME" -> listOf(28f, 26f, 45f, 22f)
+            "TOP_BAR" -> listOf(96f, 10f, 96f, 8f)
+            "BOTTOM_TICKER" -> listOf(96f, 10f, 96f, 8f)
+            else -> listOf(40f, 30f, 60f, 25f)
+        }
+        val (x, y, xPort, yPort) = when (presetType) {
+            "GAMING_BORDER" -> listOf(1f, 2f, 2f, 2f)
+            "WEBCAM_FRAME" -> listOf(70f, 68f, 50f, 72f)
+            "TOP_BAR" -> listOf(2f, 2f, 2f, 2f)
+            "BOTTOM_TICKER" -> listOf(2f, 88f, 2f, 90f)
+            else -> listOf(30f, 35f, 20f, 35f)
+        }
+
+        val newLayer = SceneLayer(
+            id = "layer_${UUID.randomUUID().toString().take(6)}",
+            type = LayerType.IMAGE_OVERLAY,
+            label = label,
+            xPct = x,
+            yPct = y,
+            widthPct = w,
+            heightPct = h,
+            xPctPortrait = xPort,
+            yPctPortrait = yPort,
+            widthPctPortrait = wPort,
+            heightPctPortrait = hPort,
+            zIndex = (current.layers.maxOfOrNull { it.zIndex } ?: 0) + 1,
+            overlayPresetType = presetType,
+            borderStrokeColorHex = strokeColorHex,
+            borderStrokeWidthDp = 3f,
+            maintainAspectRatio = false
+        )
+        val updatedScene = current.copy(layers = current.layers + newLayer)
+        _activeScene.value = updatedScene
+        _selectedLayerId.value = newLayer.id
+        saveSceneToDb(updatedScene)
+    }
+
+    fun addCustomTextLayer(
+        text: String = "LIVE BROADCAST",
+        font: String = "DEFAULT",
+        isBold: Boolean = true,
+        colorHex: String = "#00E676"
+    ) {
+        val current = _activeScene.value ?: return
+        val newLayer = SceneLayer(
+            id = "layer_${UUID.randomUUID().toString().take(6)}",
+            type = LayerType.TEXT_BANNER,
+            label = "Custom Text",
+            xPct = 20f,
+            yPct = 40f,
+            widthPct = 60f,
+            heightPct = 12f,
+            xPctPortrait = 10f,
+            yPctPortrait = 45f,
+            widthPctPortrait = 80f,
+            heightPctPortrait = 10f,
+            zIndex = (current.layers.maxOfOrNull { it.zIndex } ?: 0) + 1,
+            textContent = text,
+            textColorHex = colorHex,
+            textFontFamily = font,
+            isTextBold = isBold,
+            hasTextOutline = true,
+            hasTextShadow = true
+        )
+        val updatedScene = current.copy(layers = current.layers + newLayer)
+        _activeScene.value = updatedScene
+        _selectedLayerId.value = newLayer.id
         saveSceneToDb(updatedScene)
     }
 
@@ -283,6 +465,8 @@ class ViperStudioViewModel(application: Application) : AndroidViewModel(applicat
             label = "${source.label} (Copy)",
             xPct = (source.xPct + 4f).coerceAtMost(90f),
             yPct = (source.yPct + 4f).coerceAtMost(90f),
+            xPctPortrait = (source.xPctPortrait + 4f).coerceAtMost(90f),
+            yPctPortrait = (source.yPctPortrait + 4f).coerceAtMost(90f),
             zIndex = (current.layers.maxOfOrNull { it.zIndex } ?: 0) + 1
         )
         val updatedScene = current.copy(layers = current.layers + newLayer)
@@ -333,18 +517,25 @@ class ViperStudioViewModel(application: Application) : AndroidViewModel(applicat
         saveSceneToDb(updatedScene)
     }
 
-    fun alignLayer(layerId: String, alignment: String) {
+    fun alignLayer(layerId: String, alignment: String, isLandscape: Boolean = _streamConfig.value.isLandscape) {
         val current = _activeScene.value ?: return
         val layer = current.layers.firstOrNull { it.id == layerId } ?: return
+        val w = layer.getWidth(isLandscape)
+        val h = layer.getHeight(isLandscape)
+        val curX = layer.getX(isLandscape)
+        val curY = layer.getY(isLandscape)
+
         val (newX, newY) = when (alignment) {
-            "CENTER" -> Pair(((100f - layer.widthPct) / 2f).coerceAtLeast(0f), ((100f - layer.heightPct) / 2f).coerceAtLeast(0f))
-            "TOP" -> Pair(layer.xPct, 2f)
-            "BOTTOM" -> Pair(layer.xPct, (100f - layer.heightPct - 2f).coerceAtLeast(0f))
-            "LEFT" -> Pair(2f, layer.yPct)
-            "RIGHT" -> Pair((100f - layer.widthPct - 2f).coerceAtLeast(0f), layer.yPct)
-            else -> Pair(layer.xPct, layer.yPct)
+            "CENTER" -> Pair(((100f - w) / 2f).coerceAtLeast(0f), ((100f - h) / 2f).coerceAtLeast(0f))
+            "TOP" -> Pair(curX, 2f)
+            "BOTTOM" -> Pair(curX, (100f - h - 2f).coerceAtLeast(0f))
+            "LEFT" -> Pair(2f, curY)
+            "RIGHT" -> Pair((100f - w - 2f).coerceAtLeast(0f), curY)
+            "CENTER_H" -> Pair(((100f - w) / 2f).coerceAtLeast(0f), curY)
+            "CENTER_V" -> Pair(curX, ((100f - h) / 2f).coerceAtLeast(0f))
+            else -> Pair(curX, curY)
         }
-        updateLayerPosition(layerId, newX, newY)
+        updateLayerPosition(layerId, newX, newY, isLandscape)
     }
 
     fun addLayer(type: LayerType) {
@@ -357,7 +548,11 @@ class ViperStudioViewModel(application: Application) : AndroidViewModel(applicat
             yPct = 30f,
             widthPct = if (type == LayerType.TEXT_BANNER) 60f else 30f,
             heightPct = if (type == LayerType.TEXT_BANNER) 12f else 25f,
-            zIndex = current.layers.size + 1,
+            xPctPortrait = 15f,
+            yPctPortrait = 35f,
+            widthPctPortrait = if (type == LayerType.TEXT_BANNER) 70f else 45f,
+            heightPctPortrait = if (type == LayerType.TEXT_BANNER) 10f else 25f,
+            zIndex = (current.layers.maxOfOrNull { it.zIndex } ?: 0) + 1,
             textContent = if (type == LayerType.TEXT_BANNER) "NEW CUSTOM OVERLAY" else "@VIPER_STREAM",
             textColorHex = "#00E676"
         )
@@ -369,6 +564,10 @@ class ViperStudioViewModel(application: Application) : AndroidViewModel(applicat
 
     fun removeLayer(layerId: String) {
         val current = _activeScene.value ?: return
+        val layer = current.layers.firstOrNull { it.id == layerId }
+        if (layer?.imageUrl?.isNotBlank() == true) {
+            SceneImageManager.getInstance(getApplication()).deleteImageFile(layer.imageUrl)
+        }
         val updatedLayers = current.layers.filter { it.id != layerId }
         val updatedScene = current.copy(layers = updatedLayers)
         _activeScene.value = updatedScene
@@ -392,6 +591,48 @@ class ViperStudioViewModel(application: Application) : AndroidViewModel(applicat
         saveSceneToDb(newScene)
     }
 
+    fun duplicateScenePreset(sceneId: String, newName: String) {
+        val source = _scenes.value.firstOrNull { it.id == sceneId } ?: return
+        val clonedLayers = source.layers.map { layer ->
+            layer.copy(id = "layer_${UUID.randomUUID().toString().take(6)}")
+        }
+        val duplicated = ScenePreset(
+            id = "scene_${System.currentTimeMillis()}",
+            name = if (newName.isNotBlank()) newName else "${source.name} (Copy)",
+            isDefault = false,
+            layers = clonedLayers
+        )
+        _activeScene.value = duplicated
+        saveSceneToDb(duplicated)
+    }
+
+    fun deleteScenePreset(sceneId: String) {
+        viewModelScope.launch {
+            db.sceneDao().deleteScene(sceneId)
+            val remaining = _scenes.value.filter { it.id != sceneId }
+            if (_activeScene.value?.id == sceneId && remaining.isNotEmpty()) {
+                _activeScene.value = remaining.first()
+            }
+        }
+    }
+
+    fun setDefaultScenePreset(sceneId: String) {
+        viewModelScope.launch {
+            _scenes.value.forEach { scene ->
+                val isDef = scene.id == sceneId
+                val updated = scene.copy(isDefault = isDef)
+                db.sceneDao().insertScene(
+                    SceneEntity(
+                        id = updated.id,
+                        name = updated.name,
+                        isDefault = isDef,
+                        layersJson = ViperStudioApplication.serializeLayers(updated.layers)
+                    )
+                )
+            }
+        }
+    }
+
     private fun saveSceneToDb(scene: ScenePreset) {
         viewModelScope.launch {
             db.sceneDao().insertScene(
@@ -402,6 +643,7 @@ class ViperStudioViewModel(application: Application) : AndroidViewModel(applicat
                     layersJson = ViperStudioApplication.serializeLayers(scene.layers)
                 )
             )
+            StreamOverlayManager.getInstance(getApplication()).updateActiveScene(scene, _streamConfig.value.isLandscape)
         }
     }
 

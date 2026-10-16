@@ -455,6 +455,10 @@ class StreamForegroundService : Service() {
         statsObserverJob?.cancel()
         statsObserverJob = null
 
+        try {
+            com.example.engine.scene.StreamOverlayManager.getInstance(applicationContext).hideOverlay()
+        } catch (_: Exception) {}
+
         releaseMediaProjection()
 
         try {

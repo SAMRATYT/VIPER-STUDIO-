@@ -111,22 +111,50 @@ data class SceneLayer(
     val id: String,
     val type: LayerType,
     val label: String,
-    val xPct: Float,       // 0..100% position on canvas
+    // Landscape positions (0..100% of canvas)
+    val xPct: Float,
     val yPct: Float,
-    val widthPct: Float,   // 5..100%
+    val widthPct: Float,
     val heightPct: Float,
+    // Portrait positions (0..100% of canvas) - independent for 9:16 Shorts/Reels
+    val xPctPortrait: Float = xPct,
+    val yPctPortrait: Float = yPct,
+    val widthPctPortrait: Float = widthPct,
+    val heightPctPortrait: Float = heightPct,
     val rotationDeg: Float = 0f,
     val opacity: Float = 1.0f, // 0.0 to 1.0
     val isVisible: Boolean = true,
     val isLocked: Boolean = false,
     val zIndex: Int = 0,
+    val maintainAspectRatio: Boolean = true,
+
+    // Text specific styling
     val textContent: String = "",
     val textColorHex: String = "#00E676",
+    val textFontFamily: String = "DEFAULT", // DEFAULT, MONOSPACE, SERIF, CURSIVE
+    val textFontSizeSp: Float = 18f,
+    val isTextBold: Boolean = true,
+    val hasTextOutline: Boolean = true,
+    val textOutlineColorHex: String = "#000000",
+    val textOutlineWidth: Float = 2f,
+    val hasTextShadow: Boolean = true,
+    val textShadowColorHex: String = "#000000",
+    val textShadowRadius: Float = 4f,
+
+    // Overlay, PiP & Image properties
     val bgColorHex: String = "#B30F1722",
     val pipShape: String = "ROUNDED", // ROUNDED, CIRCLE, SQUARE
     val isMarqueeScroll: Boolean = false,
-    val imageUrl: String = ""
-)
+    val imageUrl: String = "",
+    val overlayPresetType: String = "", // GAMING_BORDER, WEBCAM_FRAME, TOP_BAR, BOTTOM_TICKER, SPONSOR_LOWER_THIRD, CUSTOM
+    val borderStrokeColorHex: String = "#00E5FF",
+    val borderStrokeWidthDp: Float = 0f
+) {
+    fun getX(isLandscape: Boolean): Float = if (isLandscape) xPct else xPctPortrait
+    fun getY(isLandscape: Boolean): Float = if (isLandscape) yPct else yPctPortrait
+    fun getWidth(isLandscape: Boolean): Float = if (isLandscape) widthPct else widthPctPortrait
+    fun getHeight(isLandscape: Boolean): Float = if (isLandscape) heightPct else heightPctPortrait
+}
 
 data class ScenePreset(
     val id: String,
